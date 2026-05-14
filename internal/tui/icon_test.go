@@ -43,6 +43,13 @@ func TestTypeIcon(t *testing.T) {
 	}
 }
 
+func TestTypeIconIsBold(t *testing.T) {
+	icon := typeIcon(model.Item{State: "OPEN", Type: model.ItemTypePullRequest})
+	if !strings.Contains(icon, "\x1b[1;") {
+		t.Fatalf("typeIcon() = %q, want bold ANSI style", icon)
+	}
+}
+
 func TestIconColor(t *testing.T) {
 	tests := []struct {
 		name string

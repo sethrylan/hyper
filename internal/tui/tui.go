@@ -756,7 +756,7 @@ func cacheStatus(data cache.Data) string {
 }
 
 func typeIcon(item model.Item) string {
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color(iconColor(item)))
+	style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(iconColor(item)))
 
 	switch item.Type {
 	case model.ItemTypePullRequest:
