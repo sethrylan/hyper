@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/sethrylan/hyper/internal/model"
 )
 
 func TestRetryDelay(t *testing.T) {
@@ -127,6 +129,7 @@ func TestSupplementalImportantQueriesIncludeRecentClosedItems(t *testing.T) {
 		"is:closed is:issue archived:false author:@me updated:>2026-04-14",
 		"is:closed is:issue archived:false assignee:@me updated:>2026-04-14",
 		"is:closed is:issue archived:false involves:@me updated:>2026-04-14",
+		"archived:false mentions:@me updated:>2026-04-14",
 	}
 
 	for _, expected := range want {
@@ -138,8 +141,23 @@ func TestSupplementalImportantQueriesIncludeRecentClosedItems(t *testing.T) {
 
 func TestSupplementalImportantPerQueryLimit(t *testing.T) {
 	queries := supplementalImportantQueries(time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC))
-	if got := maxSearchResults / len(queries); got != 200 {
-		t.Fatalf("per-query supplemental limit = %d, want 200", got)
+	if got := maxSearchResults / len(queries); got != 181 {
+		t.Fatalf("per-query supplemental limit = %d, want 181", got)
+	}
+}
+
+func TestSupplementalMentionsAreAnnotated(t *testing.T) {
+	items := withNotificationReason([]model.Item{{Key: "one"}}, "MENTION")
+	if got := items[0].NotificationReason; got != "MENTION" {
+		t.Fatalf("NotificationReason = %q, want MENTION", got)
+	}
+}
+
+func TestMergeItemPreservesSupplementalMentionReason(t *testing.T) {
+	base := model.Item{Key: "one", Title: "issue"}
+	incoming := model.Item{Key: "one", NotificationReason: "MENTION"}
+	if got := mergeItem(base, incoming).NotificationReason; got != "MENTION" {
+		t.Fatalf("NotificationReason = %q, want MENTION", got)
 	}
 }
 
@@ -175,9 +193,9 @@ func (r *stringReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func containsString(values []string, needle string) bool {
+func containsString(values []supplementalImportantQuery, needle string) bool {
 	for _, value := range values {
-		if value == needle {
+		if value.Query == needle {
 			return true
 		}
 	}

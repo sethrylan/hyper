@@ -385,33 +385,50 @@ func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string,
 	queries := supplementalImportantQueries(now)
 	var items []model.Item
 	var warning string
-	for index, query := range queries {
+	for index, source := range queries {
 		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: "supplemental searches", Step: 5, Total: 7})
-		queryItems, queryWarning, err := c.searchQuery(ctx, query, maxSearchResults/len(queries))
+		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())
 			continue
 		}
 		warning = joinWarning(warning, queryWarning)
+		queryItems = withNotificationReason(queryItems, source.NotificationReason)
 		items = mergeItems(items, queryItems)
 	}
 	return items, warning
 }
 
-func supplementalImportantQueries(now time.Time) []string {
+type supplementalImportantQuery struct {
+	NotificationReason string
+	Query              string
+}
+
+func supplementalImportantQueries(now time.Time) []supplementalImportantQuery {
 	cutoff := now.AddDate(0, 0, -30).Format("2006-01-02")
-	return []string{
-		fmt.Sprintf("is:open archived:false author:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:open archived:false assignee:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:open is:pr archived:false review-requested:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:open archived:false involves:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:pr archived:false author:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:pr archived:false assignee:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:pr archived:false involves:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:issue archived:false author:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:issue archived:false assignee:@me updated:>%s", cutoff),
-		fmt.Sprintf("is:closed is:issue archived:false involves:@me updated:>%s", cutoff),
+	return []supplementalImportantQuery{
+		{Query: fmt.Sprintf("is:open archived:false author:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:open archived:false assignee:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:open is:pr archived:false review-requested:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:open archived:false involves:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:pr archived:false author:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:pr archived:false assignee:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:pr archived:false involves:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:issue archived:false author:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:issue archived:false assignee:@me updated:>%s", cutoff)},
+		{Query: fmt.Sprintf("is:closed is:issue archived:false involves:@me updated:>%s", cutoff)},
+		{NotificationReason: "MENTION", Query: fmt.Sprintf("archived:false mentions:@me updated:>%s", cutoff)},
 	}
+}
+
+func withNotificationReason(items []model.Item, reason string) []model.Item {
+	if reason == "" {
+		return items
+	}
+	for i := range items {
+		items[i].NotificationReason = reason
+	}
+	return items
 }
 
 func mergeItems(base, incoming []model.Item) []model.Item {
@@ -456,6 +473,9 @@ func mergeItem(base, incoming model.Item) model.Item {
 	}
 	if base.StateReason == "" {
 		base.StateReason = incoming.StateReason
+	}
+	if base.NotificationReason == "" {
+		base.NotificationReason = incoming.NotificationReason
 	}
 	if base.Title == "" {
 		base.Title = incoming.Title
