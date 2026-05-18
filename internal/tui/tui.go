@@ -767,7 +767,7 @@ func typeIcon(item model.Item) string {
 		}
 		return style.Render("◉")
 	case model.ItemTypeDiscussion:
-		return "DSC"
+		return style.Render("⇄")
 	default:
 		return "NOT"
 	}
