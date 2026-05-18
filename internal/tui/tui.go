@@ -32,6 +32,8 @@ type service interface {
 type Model struct {
 	account           string
 	activeFeed        int
+	cancel            context.CancelFunc
+	ctx               context.Context
 	expanded          map[string]bool
 	feeds             map[model.Feed][]model.Item
 	height            int
@@ -87,8 +89,11 @@ type rateLimitsMsg struct {
 
 func New(service service, store *cache.Store, host string) Model {
 	data := store.Data()
+	ctx, cancel := context.WithCancel(context.Background())
 	m := Model{
 		account:        data.Account,
+		cancel:         cancel,
+		ctx:            ctx,
 		expanded:       map[string]bool{},
 		feeds:          feedsFromCache(data),
 		host:           host,
@@ -226,6 +231,7 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 		m.restoreSelection()
 		m.rebuildRows()
 	case ActionQuit:
+		m.cancel()
 		return m, tea.Quit
 	}
 	return m, nil
@@ -375,7 +381,7 @@ func (m *Model) replaceItem(item model.Item) {
 
 func (m Model) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
 		defer cancel()
 		result, err := m.service.Refresh(ctx)
 		return refreshMsg{result: result, err: err}
@@ -384,7 +390,7 @@ func (m Model) refreshCmd() tea.Cmd {
 
 func (m Model) rateLimitsCmd() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
 		limits, err := m.service.RateLimits(ctx)
 		return rateLimitsMsg{limits: limits, err: err}
