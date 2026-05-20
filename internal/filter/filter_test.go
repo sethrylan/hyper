@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package filter
 
 import (

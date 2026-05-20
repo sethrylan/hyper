@@ -1,3 +1,4 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package tui
 
 import (
@@ -21,14 +22,16 @@ const (
 	shortRefresh = time.Minute
 	fullRefresh  = 5 * time.Minute
 	progressTick = time.Second
+	unknownValue = "unknown"
 )
 
 type service interface {
 	CurrentProgress() github.RefreshProgress
-	RateLimits(context.Context) (github.RateLimits, error)
-	Refresh(context.Context) (github.RefreshResult, error)
+	RateLimits(ctx context.Context) (github.RateLimits, error)
+	Refresh(ctx context.Context) (github.RefreshResult, error)
 }
 
+//nolint:containedctx // Bubble Tea models own the lifecycle for commands they spawn.
 type Model struct {
 	account           string
 	activeFeed        int
@@ -185,6 +188,7 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 		m.showRateLimits = false
 	}
 	switch action {
+	case ActionNone:
 	case ActionDown:
 		m.selectNext()
 	case ActionUp:
@@ -261,8 +265,8 @@ func (m Model) selectable(index int) bool {
 	if index < 0 || index >= len(m.rows) {
 		return false
 	}
-	row := m.rows[index]
-	return row.kind == rowItem || (row.kind == rowRepo && !m.expanded[row.key])
+	selectedRow := m.rows[index]
+	return selectedRow.kind == rowItem || (selectedRow.kind == rowRepo && !m.expanded[selectedRow.key])
 }
 
 func (m *Model) expandSelected() {
@@ -366,8 +370,8 @@ func (m Model) selectedItem() (model.Item, bool) {
 	if m.selected < 0 || m.selected >= len(m.rows) {
 		return model.Item{}, false
 	}
-	row := m.rows[m.selected]
-	return row.item, row.kind == rowItem
+	selectedRow := m.rows[m.selected]
+	return selectedRow.item, selectedRow.kind == rowItem
 }
 
 func (m *Model) replaceItem(item model.Item) {
@@ -678,7 +682,7 @@ func (m Model) renderRateLimits() string {
 	lines := []string{
 		titleStyle().Render("GitHub rate limits"),
 		"",
-		fmt.Sprintf("account: %s", displayAccount(m.account, m.rateLimits.Account)),
+		"account: " + displayAccount(m.account, m.rateLimits.Account),
 		"",
 	}
 	switch {
@@ -703,12 +707,13 @@ func displayAccount(values ...string) string {
 			return value
 		}
 	}
-	return "unknown"
+	return unknownValue
 }
 
 func renderRateLimitLine(label string, resource github.RateLimitResource) string {
-	reset := "unknown"
+	reset := unknownValue
 	if !resource.ResetAt.IsZero() {
+		//nolint:gosmopolitan // Rate limit resets are most useful in the user's local time.
 		reset = resource.ResetAt.Local().Format(time.Kitchen)
 	}
 	return fmt.Sprintf("%-10s %5d/%-5d remaining, %5d used, resets %s", label, resource.Remaining, resource.Limit, resource.Used, reset)

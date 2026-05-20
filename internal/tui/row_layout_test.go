@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package tui
 
 import (
@@ -76,9 +77,9 @@ func layoutItem(title, author, reason string, updatedAt time.Time) model.Item {
 }
 
 func displayIndex(row, needle string) int {
-	index := strings.Index(row, needle)
-	if index < 0 {
+	before, _, found := strings.Cut(row, needle)
+	if !found {
 		return -1
 	}
-	return lipgloss.Width(row[:index])
+	return lipgloss.Width(before)
 }

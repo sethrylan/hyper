@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package cache
 
 import (
@@ -46,8 +47,8 @@ func TestStoreRoundTrip(t *testing.T) {
 		UpdatedAt:       time.Now().UTC(),
 		URL:             "https://github.com/owner/repo/issues/1",
 	}
-	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{model.FeedMyIssues: {item}}, time.Now().UTC()); err != nil {
-		t.Fatal(err)
+	if replaceErr := store.Replace("me", "github.com", map[model.Feed][]model.Item{model.FeedMyIssues: {item}}, time.Now().UTC()); replaceErr != nil {
+		t.Fatal(replaceErr)
 	}
 	loaded, err := Open(path)
 	if err != nil {

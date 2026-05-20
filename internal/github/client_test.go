@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package github
 
 import (
@@ -56,7 +57,7 @@ func TestDoWithHeadersRetriesTransientStatus(t *testing.T) {
 		return nil
 	}
 
-	raw, _, err := client.doWithHeaders(context.Background(), http.MethodPost, server.URL, "application/json", io.NopCloser(&stringReader{s: "payload"}))
+	raw, _, err := client.doWithHeaders(t.Context(), http.MethodPost, server.URL, "application/json", io.NopCloser(&stringReader{s: "payload"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestDoWithHeadersDoesNotRetryPlainForbidden(t *testing.T) {
 		return nil
 	}
 
-	if _, _, err := client.doWithHeaders(context.Background(), http.MethodGet, server.URL, "", nil); err == nil {
+	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, server.URL, "", nil); err == nil {
 		t.Fatal("expected forbidden error")
 	}
 	if calls != 1 {
@@ -112,7 +113,7 @@ func TestDoWithHeadersRetriesContextDeadlineExceeded(t *testing.T) {
 	})}
 	client.retrySleep = func(context.Context, time.Duration) error { return nil }
 
-	if _, _, err := client.doWithHeaders(context.Background(), http.MethodGet, "https://api.github.com/graphql", "", nil); err != nil {
+	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, "https://api.github.com/graphql", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -192,7 +193,7 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.Refresh(context.Background())
+		_, err := client.Refresh(t.Context())
 		done <- err
 	}()
 

@@ -1,3 +1,4 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package cache
 
 import (
@@ -22,7 +23,7 @@ type Data struct {
 	FeedItemIDs map[model.Feed][]string `json:"feed_item_ids,omitempty"`
 	Host        string                  `json:"host,omitempty"`
 	Items       map[string]model.Item   `json:"items,omitempty"`
-	LastRefresh time.Time               `json:"last_refresh,omitempty"`
+	LastRefresh time.Time               `json:"last_refresh,omitzero"`
 }
 
 type Store struct {
@@ -68,7 +69,7 @@ func (s *Store) Load() error {
 
 func (s *Store) Save() error {
 	ensureMaps(&s.data)
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 	content, err := json.MarshalIndent(s.data, "", "  ")
