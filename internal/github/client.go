@@ -1,3 +1,4 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package github
 
 import (
@@ -24,6 +25,11 @@ const (
 	maxSearchResults = 2000
 	maxRetries       = 10
 	maxRetryDelay    = 60 * time.Second
+
+	notificationReasonMention = "MENTION"
+	phaseIssues               = "issues"
+	phaseNotifications        = "notifications"
+	phaseSupplementalSearches = "supplemental searches"
 )
 
 type Client struct {
@@ -168,10 +174,10 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 	startFeedRefresh(model.FeedMyPullRequests, RefreshProgress{Phase: "pull requests", Step: 2, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.search(ctx, model.FeedMyPullRequests, now)
 	})
-	startFeedRefresh(model.FeedMyIssues, RefreshProgress{Phase: "issues", Step: 3, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+	startFeedRefresh(model.FeedMyIssues, RefreshProgress{Phase: phaseIssues, Step: 3, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.search(ctx, model.FeedMyIssues, now)
 	})
-	startFeedRefresh(model.FeedImportantNotifications, RefreshProgress{Phase: "notifications", Step: 4, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+	startFeedRefresh(model.FeedImportantNotifications, RefreshProgress{Phase: phaseNotifications, Step: 4, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.fetchNotifications(ctx, account)
 	})
 
@@ -218,7 +224,10 @@ func (p RefreshProgress) String() string {
 	}
 	var b strings.Builder
 	if p.Total > 0 && p.Step > 0 {
-		b.WriteString(fmt.Sprintf("%d/%d: ", p.Step, p.Total))
+		b.WriteString(strconv.Itoa(p.Step))
+		b.WriteString("/")
+		b.WriteString(strconv.Itoa(p.Total))
+		b.WriteString(": ")
 	}
 	b.WriteString(p.Phase)
 	if p.Detail != "" {
@@ -226,9 +235,13 @@ func (p RefreshProgress) String() string {
 		b.WriteString(p.Detail)
 	}
 	if p.DetailTotal > 0 && p.DetailStep > 0 {
-		b.WriteString(fmt.Sprintf(" %d/%d", p.DetailStep, p.DetailTotal))
+		b.WriteString(" ")
+		b.WriteString(strconv.Itoa(p.DetailStep))
+		b.WriteString("/")
+		b.WriteString(strconv.Itoa(p.DetailTotal))
 	} else if p.DetailStep > 0 {
-		b.WriteString(fmt.Sprintf(" %d", p.DetailStep))
+		b.WriteString(" ")
+		b.WriteString(strconv.Itoa(p.DetailStep))
 	}
 	return b.String()
 }
@@ -254,7 +267,7 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	notifications := make([]restNotification, 0, maxNotifications)
 	var warning string
 	for page := 1; len(notifications) < maxNotifications; page++ {
-		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: "notifications", Step: 4, Total: 7})
+		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: phaseNotifications, Step: 4, Total: 7})
 		endpoint := fmt.Sprintf("https://api.%s/notifications?all=true&per_page=100&page=%d", c.host, page)
 		var pageNotifications []restNotification
 		remaining, err := c.rest(ctx, http.MethodGet, endpoint, nil, &pageNotifications)
@@ -289,7 +302,7 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	}
 	items := importantItems(enrichedItems, me)
 
-	c.setProgress(RefreshProgress{Phase: "supplemental searches", Step: 7, Total: 7})
+	c.setProgress(RefreshProgress{Phase: phaseSupplementalSearches, Step: 7, Total: 7})
 	supplemental, supplementalWarning := c.fetchSupplementalImportantItems(ctx, me, time.Now())
 	warning = joinWarning(warning, supplementalWarning)
 	items = mergeItems(items, importantItems(supplemental, me))
@@ -415,7 +428,7 @@ func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string,
 	var items []model.Item
 	var warning string
 	for index, source := range queries {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: "supplemental searches", Step: 7, Total: 7})
+		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: phaseSupplementalSearches, Step: 7, Total: 7})
 		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())
@@ -436,17 +449,17 @@ type supplementalImportantQuery struct {
 func supplementalImportantQueries(now time.Time) []supplementalImportantQuery {
 	cutoff := now.AddDate(0, 0, -30).Format("2006-01-02")
 	return []supplementalImportantQuery{
-		{Query: fmt.Sprintf("is:open archived:false author:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:open archived:false assignee:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:open is:pr archived:false review-requested:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:open archived:false involves:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:pr archived:false author:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:pr archived:false assignee:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:pr archived:false involves:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:issue archived:false author:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:issue archived:false assignee:@me updated:>%s", cutoff)},
-		{Query: fmt.Sprintf("is:closed is:issue archived:false involves:@me updated:>%s", cutoff)},
-		{NotificationReason: "MENTION", Query: fmt.Sprintf("archived:false mentions:@me updated:>%s", cutoff)},
+		{Query: "is:open archived:false author:@me updated:>" + cutoff},
+		{Query: "is:open archived:false assignee:@me updated:>" + cutoff},
+		{Query: "is:open is:pr archived:false review-requested:@me updated:>" + cutoff},
+		{Query: "is:open archived:false involves:@me updated:>" + cutoff},
+		{Query: "is:closed is:pr archived:false author:@me updated:>" + cutoff},
+		{Query: "is:closed is:pr archived:false assignee:@me updated:>" + cutoff},
+		{Query: "is:closed is:pr archived:false involves:@me updated:>" + cutoff},
+		{Query: "is:closed is:issue archived:false author:@me updated:>" + cutoff},
+		{Query: "is:closed is:issue archived:false assignee:@me updated:>" + cutoff},
+		{Query: "is:closed is:issue archived:false involves:@me updated:>" + cutoff},
+		{NotificationReason: notificationReasonMention, Query: "archived:false mentions:@me updated:>" + cutoff},
 	}
 }
 
@@ -738,7 +751,9 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.Header, fmt.Errorf("read response: %w", err)
@@ -847,7 +862,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 func remaining(headers http.Header) int {
-	value := headers.Get("X-RateLimit-Remaining")
+	value := headers.Get("X-Ratelimit-Remaining")
 	if value == "" {
 		return -1
 	}

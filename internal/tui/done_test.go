@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package tui
 
 import (
@@ -49,7 +50,10 @@ func TestRefreshUsesReconciledDoneCache(t *testing.T) {
 			RefreshedAt: updatedAt.Add(2 * time.Hour),
 		},
 	})
-	got := updated.(Model)
+	got, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want tui.Model", updated)
+	}
 	if len(got.feeds[model.FeedImportantNotifications]) != 0 {
 		t.Fatalf("important feed count = %d, want done item hidden after refresh", len(got.feeds[model.FeedImportantNotifications]))
 	}

@@ -1,3 +1,4 @@
+//nolint:testpackage // These tests exercise package internals.
 package tui
 
 import (
@@ -89,19 +90,19 @@ func TestRenderRateLimits(t *testing.T) {
 			Core: github.RateLimitResource{
 				Limit:     15000,
 				Remaining: 14065,
-				ResetAt:   time.Date(2026, 5, 14, 10, 30, 0, 0, time.Local),
+				ResetAt:   time.Date(2026, 5, 14, 10, 30, 0, 0, time.UTC),
 				Used:      935,
 			},
 			GraphQL: github.RateLimitResource{
 				Limit:     10000,
 				Remaining: 5761,
-				ResetAt:   time.Date(2026, 5, 14, 10, 26, 0, 0, time.Local),
+				ResetAt:   time.Date(2026, 5, 14, 10, 26, 0, 0, time.UTC),
 				Used:      4239,
 			},
 			Search: github.RateLimitResource{
 				Limit:     30,
 				Remaining: 30,
-				ResetAt:   time.Date(2026, 5, 14, 10, 8, 0, 0, time.Local),
+				ResetAt:   time.Date(2026, 5, 14, 10, 8, 0, 0, time.UTC),
 				Used:      0,
 			},
 		},

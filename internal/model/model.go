@@ -1,6 +1,10 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package model
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 type Feed string
 
@@ -38,9 +42,9 @@ const (
 type Item struct {
 	Assignees            []string  `json:"assignees,omitempty"`
 	AuthorLogin          string    `json:"author_login,omitempty"`
-	CreatedAt            time.Time `json:"created_at,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitzero"`
 	Done                 bool      `json:"done,omitempty"`
-	DoneAt               time.Time `json:"done_at,omitempty"`
+	DoneAt               time.Time `json:"done_at,omitzero"`
 	Draft                bool      `json:"draft,omitempty"`
 	Host                 string    `json:"host"`
 	Key                  string    `json:"key"`
@@ -71,10 +75,8 @@ func (i Item) Repository() string {
 }
 
 func (i Item) WithFeed(feed Feed) Item {
-	for _, existing := range i.SourceFeeds {
-		if existing == feed {
-			return i
-		}
+	if slices.Contains(i.SourceFeeds, feed) {
+		return i
 	}
 	i.SourceFeeds = append(i.SourceFeeds, feed)
 	return i
