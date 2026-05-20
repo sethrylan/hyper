@@ -1,7 +1,10 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package clipboard
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"html"
 	"os"
@@ -11,14 +14,16 @@ import (
 
 func Copy(value string) error {
 	if value == "" {
-		return fmt.Errorf("nothing to copy")
+		return errors.New("nothing to copy")
 	}
 	if os.Getenv("TERM") != "dumb" {
-		fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\a", base64(value))
+		if _, err := fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\a", base64(value)); err != nil {
+			return fmt.Errorf("copy with OSC 52: %w", err)
+		}
 		return nil
 	}
 	if _, err := exec.LookPath("pbcopy"); err == nil {
-		cmd := exec.Command("pbcopy")
+		cmd := exec.CommandContext(context.Background(), "pbcopy")
 		cmd.Stdin = bytes.NewBufferString(value)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("pbcopy: %w", err)
@@ -30,7 +35,7 @@ func Copy(value string) error {
 
 func CopyLink(url, title string) error {
 	if url == "" {
-		return fmt.Errorf("nothing to copy")
+		return errors.New("nothing to copy")
 	}
 	if title != "" && runtime.GOOS == "darwin" {
 		if err := copyHTML(url, title); err == nil {
@@ -54,7 +59,7 @@ function run(argv) {
   pasteboard.setStringForType($(htmlText), $.NSPasteboardTypeHTML)
 }
 `
-	cmd := exec.Command("osascript", "-l", "JavaScript", "-e", script, url, linkHTML(url, title))
+	cmd := exec.CommandContext(context.Background(), "osascript", "-l", "JavaScript", "-e", script, url, linkHTML(url, title)) //nolint:gosec // Arguments are passed directly to osascript, not interpreted by a shell.
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("copy rich link: %w", err)
 	}

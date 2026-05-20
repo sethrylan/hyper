@@ -1,3 +1,4 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package auth
 
 import (

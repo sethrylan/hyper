@@ -1,3 +1,4 @@
+//nolint:revive // Internal package exports are shared across command and tests.
 package filter
 
 import (
@@ -15,9 +16,9 @@ func Query(feed model.Feed, now time.Time) (string, error) {
 	cutoff := now.AddDate(0, 0, -defaultRelativeDays).Format("2006-01-02")
 	switch feed {
 	case model.FeedMyPullRequests:
-		return fmt.Sprintf("is:open is:pr author:@me archived:false created:>%s", cutoff), nil
+		return "is:open is:pr author:@me archived:false created:>" + cutoff, nil
 	case model.FeedMyIssues:
-		return fmt.Sprintf("is:open is:issue author:@me archived:false created:>%s", cutoff), nil
+		return "is:open is:issue author:@me archived:false created:>" + cutoff, nil
 	default:
 		return "", fmt.Errorf("feed %s has no search query", feed)
 	}
