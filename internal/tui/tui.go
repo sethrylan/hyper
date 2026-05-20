@@ -31,7 +31,7 @@ type service interface {
 	Refresh(ctx context.Context) (github.RefreshResult, error)
 }
 
-//nolint:containedctx // Bubble Tea models own the lifecycle for commands they spawn.
+//nolint:containedctx,recvcheck // Bubble Tea models own command lifecycle; value receivers are required by tea.Model usage.
 type Model struct {
 	account           string
 	activeFeed        int
