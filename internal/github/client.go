@@ -138,34 +138,63 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 		return RefreshResult{}, err
 	}
 
-	c.setProgress(RefreshProgress{Phase: "notifications", Step: 2, Total: 7})
-	notifications, warning, err := c.fetchNotifications(ctx, account)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	rateWarning = joinWarning(rateWarning, warning)
+	refreshCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	c.setProgress(RefreshProgress{Phase: "pull requests", Step: 6, Total: 7})
-	prs, warning, err := c.search(ctx, model.FeedMyPullRequests, now)
-	if err != nil {
-		return RefreshResult{}, err
+	type feedRefreshResult struct {
+		err     error
+		feed    model.Feed
+		items   []model.Item
+		warning string
 	}
-	rateWarning = joinWarning(rateWarning, warning)
 
-	c.setProgress(RefreshProgress{Phase: "issues", Step: 7, Total: 7})
-	issues, warning, err := c.search(ctx, model.FeedMyIssues, now)
-	if err != nil {
-		return RefreshResult{}, err
+	results := make(chan feedRefreshResult, 3)
+	startFeedRefresh := func(feed model.Feed, progress RefreshProgress, refresh func(context.Context) ([]model.Item, string, error)) {
+		go func() {
+			c.setProgress(progress)
+			items, warning, err := refresh(refreshCtx)
+			if err != nil {
+				cancel()
+			}
+			results <- feedRefreshResult{
+				err:     err,
+				feed:    feed,
+				items:   items,
+				warning: warning,
+			}
+		}()
 	}
-	rateWarning = joinWarning(rateWarning, warning)
+
+	startFeedRefresh(model.FeedMyPullRequests, RefreshProgress{Phase: "pull requests", Step: 2, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+		return c.search(ctx, model.FeedMyPullRequests, now)
+	})
+	startFeedRefresh(model.FeedMyIssues, RefreshProgress{Phase: "issues", Step: 3, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+		return c.search(ctx, model.FeedMyIssues, now)
+	})
+	startFeedRefresh(model.FeedImportantNotifications, RefreshProgress{Phase: "notifications", Step: 4, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+		return c.fetchNotifications(ctx, account)
+	})
+
+	feeds := map[model.Feed][]model.Item{}
+	var firstErr error
+	for range 3 {
+		result := <-results
+		if result.err != nil {
+			if firstErr == nil || errors.Is(firstErr, context.Canceled) {
+				firstErr = result.err
+			}
+			continue
+		}
+		rateWarning = joinWarning(rateWarning, result.warning)
+		feeds[result.feed] = result.items
+	}
+	if firstErr != nil {
+		return RefreshResult{}, firstErr
+	}
 
 	return RefreshResult{
-		Account: account,
-		Feeds: map[model.Feed][]model.Item{
-			model.FeedImportantNotifications: notifications,
-			model.FeedMyPullRequests:         prs,
-			model.FeedMyIssues:               issues,
-		},
+		Account:     account,
+		Feeds:       feeds,
 		RateWarning: rateWarning,
 		RefreshedAt: now,
 	}, nil
@@ -225,7 +254,7 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	notifications := make([]restNotification, 0, maxNotifications)
 	var warning string
 	for page := 1; len(notifications) < maxNotifications; page++ {
-		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: "notifications", Step: 2, Total: 7})
+		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: "notifications", Step: 4, Total: 7})
 		endpoint := fmt.Sprintf("https://api.%s/notifications?all=true&per_page=100&page=%d", c.host, page)
 		var pageNotifications []restNotification
 		remaining, err := c.rest(ctx, http.MethodGet, endpoint, nil, &pageNotifications)
@@ -247,10 +276,10 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	}
 	notificationItems := make([]model.Item, 0, len(notifications))
 	for index, notification := range notifications {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(notifications), Phase: "notification details", Step: 3, Total: 7})
+		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(notifications), Phase: "notification details", Step: 5, Total: 7})
 		notificationItems = append(notificationItems, c.restNotificationItem(ctx, notification))
 	}
-	c.setProgress(RefreshProgress{Phase: "notification enrichment", Step: 4, Total: 7})
+	c.setProgress(RefreshProgress{Phase: "notification enrichment", Step: 6, Total: 7})
 	enrichedItems, enrichWarning, err := c.enrichItems(ctx, notificationItems)
 	if err != nil {
 		warning = joinWarning(warning, "notification subject enrichment failed: "+err.Error())
@@ -260,7 +289,7 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	}
 	items := importantItems(enrichedItems, me)
 
-	c.setProgress(RefreshProgress{Phase: "supplemental searches", Step: 5, Total: 7})
+	c.setProgress(RefreshProgress{Phase: "supplemental searches", Step: 7, Total: 7})
 	supplemental, supplementalWarning := c.fetchSupplementalImportantItems(ctx, me, time.Now())
 	warning = joinWarning(warning, supplementalWarning)
 	items = mergeItems(items, importantItems(supplemental, me))
@@ -365,7 +394,7 @@ func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[s
 	var warning string
 	for start := 0; start < len(ids); start += 100 {
 		end := min(start+100, len(ids))
-		c.setProgress(RefreshProgress{DetailStep: start/100 + 1, DetailTotal: (len(ids) + 99) / 100, Phase: "notification enrichment", Step: 4, Total: 7})
+		c.setProgress(RefreshProgress{DetailStep: start/100 + 1, DetailTotal: (len(ids) + 99) / 100, Phase: "notification enrichment", Step: 6, Total: 7})
 		var response nodesResponse
 		if err := c.graphQL(ctx, nodesGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
 			return nil, warning, err
@@ -386,7 +415,7 @@ func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string,
 	var items []model.Item
 	var warning string
 	for index, source := range queries {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: "supplemental searches", Step: 5, Total: 7})
+		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: "supplemental searches", Step: 7, Total: 7})
 		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())

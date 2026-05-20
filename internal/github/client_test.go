@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,6 +154,82 @@ func TestSupplementalMentionsAreAnnotated(t *testing.T) {
 	}
 }
 
+func TestRefreshFetchesFeedsInParallel(t *testing.T) {
+	started := make(chan string, 3)
+	release := make(chan struct{})
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body string
+		if req.Body != nil {
+			raw, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, err
+			}
+			body = string(raw)
+		}
+
+		switch {
+		case req.URL.Path == "/graphql" && strings.Contains(body, "query { viewer"):
+			return jsonResponse(`{"data":{"viewer":{"login":"me"},"rateLimit":{"remaining":500}}}`), nil
+		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:pr"):
+			started <- "pull requests"
+			<-release
+			return emptySearchResponse(), nil
+		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:issue"):
+			started <- "issues"
+			<-release
+			return emptySearchResponse(), nil
+		case req.URL.Path == "/notifications":
+			started <- "notifications"
+			<-release
+			return jsonResponse(`[]`), nil
+		case req.URL.Path == "/graphql":
+			return emptySearchResponse(), nil
+		default:
+			return jsonResponse(`{"message":"unexpected request"}`), nil
+		}
+	})}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Refresh(context.Background())
+		done <- err
+	}()
+
+	seen := map[string]bool{}
+	for range 3 {
+		select {
+		case feed := <-started:
+			seen[feed] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for parallel feed refreshes; started feeds = %#v", seen)
+		}
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("Refresh completed before all feed refreshes started: %v", err)
+	default:
+	}
+
+	close(release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Refresh to complete")
+	}
+
+	for _, feed := range []string{"pull requests", "issues", "notifications"} {
+		if !seen[feed] {
+			t.Fatalf("feed %q was not refreshed in parallel; started feeds = %#v", feed, seen)
+		}
+	}
+}
+
 func TestMergeItemPreservesSupplementalMentionReason(t *testing.T) {
 	base := model.Item{Key: "one", Title: "issue"}
 	incoming := model.Item{Key: "one", NotificationReason: "MENTION"}
@@ -166,12 +243,25 @@ func TestRefreshProgressString(t *testing.T) {
 		DetailStep:  3,
 		DetailTotal: 7,
 		Phase:       "supplemental searches",
-		Step:        5,
+		Step:        7,
 		Total:       7,
 	}
-	if got := progress.String(); got != "5/7: supplemental searches 3/7" {
+	if got := progress.String(); got != "7/7: supplemental searches 3/7" {
 		t.Fatalf("RefreshProgress.String() = %q, want progress text", got)
 	}
+}
+
+func jsonResponse(body string) *http.Response {
+	return &http.Response{
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"X-Ratelimit-Remaining": []string{"500"}},
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+	}
+}
+
+func emptySearchResponse() *http.Response {
+	return jsonResponse(`{"data":{"rateLimit":{"remaining":500},"search":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

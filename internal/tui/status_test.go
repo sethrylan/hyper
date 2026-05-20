@@ -48,13 +48,13 @@ func TestRenderStatusIncludesRefreshProgress(t *testing.T) {
 			DetailStep:  3,
 			DetailTotal: 7,
 			Phase:       "supplemental searches",
-			Step:        5,
+			Step:        7,
 			Total:       7,
 		},
 	}
 
 	status := m.renderStatus()
-	if !strings.Contains(status, "refreshing 5/7: supplemental searches 3/7") {
+	if !strings.Contains(status, "refreshing 7/7: supplemental searches 3/7") {
 		t.Fatalf("renderStatus() = %q, want progress text", status)
 	}
 	if !strings.Contains(status, "1m15s") {
