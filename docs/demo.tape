@@ -16,24 +16,17 @@ Type "hyper"
 Enter
 Sleep 4s
 
-Down
+Tab
 Sleep 500ms
-Down
-Sleep 500ms
-Down
-Sleep 500ms
-Down
-Sleep 500ms
-
 Tab
 Sleep 1s
-Down
-Sleep 500ms
-Down
-Sleep 500ms
 
-Tab
-Sleep 1s
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
 Down
 Sleep 500ms
 
