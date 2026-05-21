@@ -24,7 +24,7 @@ The demo workflow needs to run on a pull request and write to the same PR branch
 
 ### Solution to #1: Triggering workflow runs
 
-This workflow uses `GITHUB_TOKEN` for the GIF commit. Pushes with `GITHUB_TOKEN` do not trigger downstream CI workflows — this is acceptable here since the only change is a generated GIF, which does not need re-validation.
+This workflow creates a short-lived GitHub App token (`CI_BOT_APP_ID` / `CI_BOT_APP_PRIVATE_KEY`) and uses it for both `actions/checkout` and the subsequent `git push`. Pushes authenticated as a GitHub App do trigger downstream CI workflows, so required checks run on the demo GIF commit.
 
 ### Solution to #2: Protecting against circular workflow dispatch
 
@@ -38,9 +38,12 @@ The demo workflow must protect against a [pwn request](https://securitylab.githu
 sequenceDiagram
     participant U as Collaborator<br/>(write access)
     participant D as demo.yml<br/>workflow_dispatch<br/>🔓 contents: write
+    participant A as GitHub App<br/>(CI_BOT)
 
     U->>D: gh workflow run -f pr_number=N
-    Note over D: Checks out PR code (by SHA)<br/>Generates GIF via VHS (GH_TOKEN scoped to repo)<br/>Commits to PR branch (GITHUB_TOKEN)<br/>Posts sticky PR comment
+    D->>A: Request short-lived token
+    A-->>D: app token
+    Note over D: Checks out PR code (by SHA, app token)<br/>Generates GIF via VHS (GH_TOKEN scoped to repo)<br/>Commits to PR branch (app token → triggers CI)<br/>Posts sticky PR comment
     D-->>U: PR comment with demo GIF
 ```
 
