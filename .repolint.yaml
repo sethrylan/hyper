@@ -1,6 +1,6 @@
 checks:
   settings:
-    issues: true
+    issues: false
     discussions: true
 
   files:
