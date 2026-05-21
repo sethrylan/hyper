@@ -62,3 +62,32 @@ func TestRenderStatusIncludesRefreshProgress(t *testing.T) {
 		t.Fatalf("renderStatus() = %q, want elapsed duration", status)
 	}
 }
+
+func TestRenderStatusUsesHostWhenAccountUnknown(t *testing.T) {
+	m := Model{
+		host:    "github.com",
+		loading: true,
+		status:  "cache empty",
+	}
+
+	status := m.renderStatus()
+	if strings.Contains(status, "unknown@github.com") {
+		t.Fatalf("renderStatus() = %q, want no unknown account placeholder", status)
+	}
+	if !strings.Contains(status, "github.com |") {
+		t.Fatalf("renderStatus() = %q, want host-only status prefix", status)
+	}
+}
+
+func TestRenderStatusIncludesKnownAccount(t *testing.T) {
+	m := Model{
+		account: "me",
+		host:    "github.com",
+		status:  "ready",
+	}
+
+	status := m.renderStatus()
+	if !strings.Contains(status, "me@github.com | ready") {
+		t.Fatalf("renderStatus() = %q, want account and host prefix", status)
+	}
+}

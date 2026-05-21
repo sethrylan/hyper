@@ -26,7 +26,7 @@ func main() {
 	}
 
 	client := github.NewClient(ctx.Host, ctx.Token)
-	model := tui.New(client, store, ctx.Host)
+	model := tui.New(client, store, ctx.Host, ctx.Account)
 	if _, err := tea.NewProgram(model).Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "hyper: %v\n", err)
 		os.Exit(1)

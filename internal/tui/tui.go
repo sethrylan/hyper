@@ -90,11 +90,14 @@ type rateLimitsMsg struct {
 	err    error
 }
 
-func New(service service, store *cache.Store, host string) Model {
+func New(service service, store *cache.Store, host, account string) Model {
 	data := store.Data()
+	if account == "" {
+		account = data.Account
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := Model{
-		account:        data.Account,
+		account:        account,
 		cancel:         cancel,
 		ctx:            ctx,
 		expanded:       map[string]bool{},
@@ -640,10 +643,6 @@ func (m Model) renderRow(r row, width int, layout itemRowLayout) string {
 }
 
 func (m Model) renderStatus() string {
-	account := m.account
-	if account == "" {
-		account = "unknown"
-	}
 	status := m.status
 	if m.loading {
 		progress := m.refreshProgress.String()
@@ -655,7 +654,14 @@ func (m Model) renderStatus() string {
 	if m.rateWarning != "" {
 		status = status + " | " + m.rateWarning
 	}
-	return statusStyle().Render(fmt.Sprintf("%s@%s | %s", account, m.host, status))
+	return statusStyle().Render(fmt.Sprintf("%s | %s", m.accountStatusPrefix(), status))
+}
+
+func (m Model) accountStatusPrefix() string {
+	if m.account == "" {
+		return m.host
+	}
+	return fmt.Sprintf("%s@%s", m.account, m.host)
 }
 
 func (m Model) renderHelp() string {
