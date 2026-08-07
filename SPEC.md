@@ -95,13 +95,15 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Search results for My Pull Requests and My Issues: 500 each.
 - Poll periodically.
 - Cadence:
-  - Short refresh approximately every 60 seconds.
-  - Full refresh approximately every 5 minutes.
+  - Short refresh approximately every 60 seconds. It should use REST notifications updated since the last successful refresh, add or update Important items without removing cached items, and make no GraphQL requests.
+  - Full refresh approximately every 5 minutes. It remains authoritative for all feeds and for removing stale Important items.
 - Keep a local cache so the app can render recent results quickly on startup.
 - On rate-limit pressure:
   - Show a warning in the status bar.
   - Reduce query depth before failing the whole app.
+  - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
+- Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
 
 ## Cache and local state
 

@@ -29,7 +29,15 @@ type service interface {
 	CurrentProgress() github.RefreshProgress
 	RateLimits(ctx context.Context) (github.RateLimits, error)
 	Refresh(ctx context.Context) (github.RefreshResult, error)
+	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.NotificationRefreshResult, error)
 }
+
+type refreshKind int
+
+const (
+	refreshFull refreshKind = iota
+	refreshNotifications
+)
 
 //nolint:containedctx,recvcheck // Bubble Tea models own command lifecycle; value receivers are required by tea.Model usage.
 type Model struct {
@@ -41,6 +49,7 @@ type Model struct {
 	feeds             map[model.Feed][]model.Item
 	height            int
 	host              string
+	lastFullRefreshAt time.Time
 	loading           bool
 	loadingAt         time.Time
 	rateWarning       string
@@ -79,8 +88,13 @@ type refreshMsg struct {
 	err    error
 }
 
+type notificationRefreshMsg struct {
+	result github.NotificationRefreshResult
+	err    error
+}
+
 type tickMsg struct {
-	full bool
+	at time.Time
 }
 
 type progressTickMsg struct{}
@@ -93,19 +107,21 @@ type rateLimitsMsg struct {
 func New(service service, store *cache.Store, host string) Model {
 	data := store.Data()
 	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Now()
 	m := Model{
-		account:        data.Account,
-		cancel:         cancel,
-		ctx:            ctx,
-		expanded:       map[string]bool{},
-		feeds:          feedsFromCache(data),
-		host:           host,
-		loading:        true,
-		loadingAt:      time.Now(),
-		selectedByFeed: map[model.Feed]int{},
-		service:        service,
-		status:         cacheStatus(data),
-		store:          store,
+		account:           data.Account,
+		cancel:            cancel,
+		ctx:               ctx,
+		expanded:          map[string]bool{},
+		feeds:             feedsFromCache(data),
+		host:              host,
+		lastFullRefreshAt: now,
+		loading:           true,
+		loadingAt:         now,
+		selectedByFeed:    map[model.Feed]int{},
+		service:           service,
+		status:            cacheStatus(data),
+		store:             store,
 	}
 	for _, feed := range model.Feeds {
 		m.expanded["feed:"+string(feed)] = true
@@ -115,7 +131,7 @@ func New(service service, store *cache.Store, host string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestWindowSize, tea.RequestBackgroundColor, m.startRefreshCmd(), tickCmd(false), tickCmd(true))
+	return tea.Batch(tea.RequestWindowSize, tea.RequestBackgroundColor, m.startRefreshCmd(refreshFull), tickCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -143,12 +159,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rateWarning = msg.result.RateWarning
 		m.status = "refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
+	case notificationRefreshMsg:
+		m.loading = false
+		m.refreshProgress = github.RefreshProgress{}
+		if msg.err != nil {
+			m.status = "notification refresh failed: " + msg.err.Error()
+			return m, nil
+		}
+		feeds := cloneFeeds(m.feeds)
+		feeds[model.FeedImportantNotifications] = msg.result.Items
+		if err := m.store.Replace(msg.result.Account, m.host, feeds, msg.result.RefreshedAt); err != nil {
+			m.status = "cache save failed: " + err.Error()
+			return m, nil
+		}
+		m.account = msg.result.Account
+		m.feeds = feedsFromCache(m.store.Data())
+		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
+		m.status = "notifications refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
+		m.rebuildRows()
 	case tickMsg:
-		cmds := []tea.Cmd{tickCmd(msg.full)}
+		cmds := []tea.Cmd{tickCmd()}
 		if !m.loading {
+			kind := m.automaticRefreshKind(msg.at)
+			if kind == refreshFull {
+				m.lastFullRefreshAt = msg.at
+			}
 			m.loading = true
-			m.loadingAt = time.Now()
-			cmds = append(cmds, m.startRefreshCmd())
+			m.loadingAt = msg.at
+			cmds = append(cmds, m.startRefreshCmd(kind))
 		}
 		return m, tea.Batch(cmds...)
 	case progressTickMsg:
@@ -165,9 +203,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rateLimits = msg.limits
 		m.rateLimitsErr = ""
-		if msg.limits.Account != "" {
-			m.account = msg.limits.Account
-		}
 	}
 	return m, nil
 }
@@ -205,9 +240,11 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 		return m.openSelected()
 	case ActionRefresh:
 		if !m.loading {
+			now := time.Now()
+			m.lastFullRefreshAt = now
 			m.loading = true
-			m.loadingAt = time.Now()
-			return m, m.startRefreshCmd()
+			m.loadingAt = now
+			return m, m.startRefreshCmd(refreshFull)
 		}
 	case ActionRateLimits:
 		if m.showRateLimits {
@@ -392,6 +429,20 @@ func (m Model) refreshCmd() tea.Cmd {
 	}
 }
 
+func (m Model) notificationRefreshCmd() tea.Cmd {
+	request := github.NotificationRefreshRequest{
+		Account:  m.account,
+		Existing: append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
+		Since:    m.store.Data().LastRefresh,
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
+		defer cancel()
+		result, err := m.service.RefreshNotifications(ctx, request)
+		return notificationRefreshMsg{result: result, err: err}
+	}
+}
+
 func (m Model) rateLimitsCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
@@ -401,16 +452,25 @@ func (m Model) rateLimitsCmd() tea.Cmd {
 	}
 }
 
-func (m Model) startRefreshCmd() tea.Cmd {
-	return tea.Batch(m.refreshCmd(), progressTickCmd())
+func (m Model) startRefreshCmd(kind refreshKind) tea.Cmd {
+	var refresh tea.Cmd
+	if kind == refreshFull {
+		refresh = m.refreshCmd()
+	} else {
+		refresh = m.notificationRefreshCmd()
+	}
+	return tea.Batch(refresh, progressTickCmd())
 }
 
-func tickCmd(full bool) tea.Cmd {
-	duration := shortRefresh
-	if full {
-		duration = fullRefresh
+func tickCmd() tea.Cmd {
+	return tea.Tick(shortRefresh, func(at time.Time) tea.Msg { return tickMsg{at: at} })
+}
+
+func (m Model) automaticRefreshKind(at time.Time) refreshKind {
+	if at.Sub(m.lastFullRefreshAt) >= fullRefresh {
+		return refreshFull
 	}
-	return tea.Tick(duration, func(time.Time) tea.Msg { return tickMsg{full: full} })
+	return refreshNotifications
 }
 
 func progressTickCmd() tea.Cmd {
@@ -682,7 +742,7 @@ func (m Model) renderRateLimits() string {
 	lines := []string{
 		titleStyle().Render("GitHub rate limits"),
 		"",
-		"account: " + displayAccount(m.account, m.rateLimits.Account),
+		"account: " + displayAccount(m.account),
 		"",
 	}
 	switch {
@@ -717,6 +777,25 @@ func renderRateLimitLine(label string, resource github.RateLimitResource) string
 		reset = resource.ResetAt.Local().Format(time.Kitchen)
 	}
 	return fmt.Sprintf("%-10s %5d/%-5d remaining, %5d used, resets %s", label, resource.Remaining, resource.Limit, resource.Used, reset)
+}
+
+func cloneFeeds(feeds map[model.Feed][]model.Item) map[model.Feed][]model.Item {
+	clone := make(map[model.Feed][]model.Item, len(feeds))
+	for feed, items := range feeds {
+		clone[feed] = append([]model.Item(nil), items...)
+	}
+	return clone
+}
+
+func mergeWarnings(existing, incoming string) string {
+	switch {
+	case existing == "":
+		return incoming
+	case incoming == "", strings.Contains(existing, incoming):
+		return existing
+	default:
+		return existing + "; " + incoming
+	}
 }
 
 func feedsFromCache(data cache.Data) map[model.Feed][]model.Item {
