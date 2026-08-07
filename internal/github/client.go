@@ -21,16 +21,19 @@ import (
 )
 
 const (
-	maxNotifications = 500
-	maxSearchResults = 2000
-	maxRetries       = 10
-	maxRetryDelay    = 60 * time.Second
+	maxNotifications     = 500
+	notificationPageSize = 50
+	maxSearchResults     = 2000
+	maxRetries           = 10
+	maxRetryDelay        = 60 * time.Second
 
 	notificationReasonMention = "MENTION"
 	phaseIssues               = "issues"
 	phaseNotifications        = "notifications"
 	phaseSupplementalSearches = "supplemental searches"
 )
+
+var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
 type Client struct {
 	progress   atomic.Value
@@ -56,8 +59,20 @@ type RefreshResult struct {
 	RefreshedAt time.Time
 }
 
+type NotificationRefreshRequest struct {
+	Account  string
+	Existing []model.Item
+	Since    time.Time
+}
+
+type NotificationRefreshResult struct {
+	Account     string
+	Items       []model.Item
+	RateWarning string
+	RefreshedAt time.Time
+}
+
 type RateLimits struct {
-	Account string
 	Core    RateLimitResource
 	GraphQL RateLimitResource
 	Search  RateLimitResource
@@ -98,41 +113,49 @@ func NewClient(host, token string) *Client {
 func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 	var restResponse struct {
 		Resources struct {
-			Core   restRateLimitResource `json:"core"`
-			Search restRateLimitResource `json:"search"`
+			Core    restRateLimitResource `json:"core"`
+			GraphQL restRateLimitResource `json:"graphql"`
+			Search  restRateLimitResource `json:"search"`
 		} `json:"resources"`
 	}
 	if _, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/rate_limit", c.host), nil, &restResponse); err != nil {
 		return RateLimits{}, fmt.Errorf("fetch REST rate limits: %w", err)
 	}
 
-	var graphQLResponse struct {
-		Data struct {
-			RateLimit struct {
-				Limit     int       `json:"limit"`
-				Remaining int       `json:"remaining"`
-				ResetAt   time.Time `json:"resetAt"`
-				Used      int       `json:"used"`
-			} `json:"rateLimit"`
-			Viewer struct {
-				Login string `json:"login"`
-			} `json:"viewer"`
-		} `json:"data"`
-	}
-	if err := c.graphQL(ctx, `query { rateLimit { limit used remaining resetAt } viewer { login } }`, nil, &graphQLResponse); err != nil {
-		return RateLimits{}, fmt.Errorf("fetch GraphQL rate limits: %w", err)
+	return RateLimits{
+		Core:    restResponse.Resources.Core.Resource(),
+		GraphQL: restResponse.Resources.GraphQL.Resource(),
+		Search:  restResponse.Resources.Search.Resource(),
+	}, nil
+}
+
+func (c *Client) RefreshNotifications(ctx context.Context, request NotificationRefreshRequest) (NotificationRefreshResult, error) {
+	now := time.Now()
+	account := request.Account
+	var warning string
+	if account == "" {
+		var response struct {
+			Login string `json:"login"`
+		}
+		remaining, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
+		if err != nil {
+			return NotificationRefreshResult{}, fmt.Errorf("fetch authenticated user: %w", err)
+		}
+		account = response.Login
+		warning = rateWarning(remaining)
 	}
 
-	return RateLimits{
-		Account: graphQLResponse.Data.Viewer.Login,
-		Core:    restResponse.Resources.Core.Resource(),
-		GraphQL: RateLimitResource{
-			Limit:     graphQLResponse.Data.RateLimit.Limit,
-			Remaining: graphQLResponse.Data.RateLimit.Remaining,
-			ResetAt:   graphQLResponse.Data.RateLimit.ResetAt,
-			Used:      graphQLResponse.Data.RateLimit.Used,
-		},
-		Search: restResponse.Resources.Search.Resource(),
+	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 2)
+	if err != nil {
+		return NotificationRefreshResult{}, err
+	}
+	warning = joinWarning(warning, notificationWarning)
+
+	return NotificationRefreshResult{
+		Account:     account,
+		Items:       mergeShortImportantItems(request.Existing, items, account),
+		RateWarning: warning,
+		RefreshedAt: now,
 	}, nil
 }
 
@@ -264,33 +287,9 @@ func (c *Client) viewer(ctx context.Context) (string, string, error) {
 }
 
 func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Item, string, error) {
-	notifications := make([]restNotification, 0, maxNotifications)
-	var warning string
-	for page := 1; len(notifications) < maxNotifications; page++ {
-		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: phaseNotifications, Step: 4, Total: 7})
-		endpoint := fmt.Sprintf("https://api.%s/notifications?all=true&per_page=100&page=%d", c.host, page)
-		var pageNotifications []restNotification
-		remaining, err := c.rest(ctx, http.MethodGet, endpoint, nil, &pageNotifications)
-		if err != nil {
-			return nil, warning, fmt.Errorf("fetch notifications: %w", err)
-		}
-		warning = joinWarning(warning, rateWarning(remaining))
-		if len(pageNotifications) == 0 {
-			break
-		}
-		remainingCap := maxNotifications - len(notifications)
-		if len(pageNotifications) > remainingCap {
-			pageNotifications = pageNotifications[:remainingCap]
-		}
-		notifications = append(notifications, pageNotifications...)
-		if len(pageNotifications) < 100 {
-			break
-		}
-	}
-	notificationItems := make([]model.Item, 0, len(notifications))
-	for index, notification := range notifications {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(notifications), Phase: "notification details", Step: 5, Total: 7})
-		notificationItems = append(notificationItems, c.restNotificationItem(ctx, notification))
+	notificationItems, warning, err := c.fetchRESTNotificationItems(ctx, time.Time{}, 4, 5, 7)
+	if err != nil {
+		return nil, warning, err
 	}
 	c.setProgress(RefreshProgress{Phase: "notification enrichment", Step: 6, Total: 7})
 	enrichedItems, enrichWarning, err := c.enrichItems(ctx, notificationItems)
@@ -310,6 +309,46 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 		items[i] = items[i].WithFeed(model.FeedImportantNotifications)
 	}
 	return items, warning, nil
+}
+
+func (c *Client) fetchRESTNotificationItems(ctx context.Context, since time.Time, listStep, detailStep, total int) ([]model.Item, string, error) {
+	notifications := make([]restNotification, 0, maxNotifications)
+	var warning string
+	for page := 1; len(notifications) < maxNotifications; page++ {
+		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: phaseNotifications, Step: listStep, Total: total})
+		query := url.Values{
+			"all":      {"true"},
+			"page":     {strconv.Itoa(page)},
+			"per_page": {strconv.Itoa(notificationPageSize)},
+		}
+		if !since.IsZero() {
+			query.Set("since", since.Add(-time.Second).UTC().Format(time.RFC3339))
+		}
+		endpoint := fmt.Sprintf("https://api.%s/notifications?%s", c.host, query.Encode())
+		var pageNotifications []restNotification
+		remaining, err := c.rest(ctx, http.MethodGet, endpoint, nil, &pageNotifications)
+		if err != nil {
+			return nil, warning, fmt.Errorf("fetch notifications: %w", err)
+		}
+		warning = joinWarning(warning, rateWarning(remaining))
+		if len(pageNotifications) == 0 {
+			break
+		}
+		remainingCap := maxNotifications - len(notifications)
+		if len(pageNotifications) > remainingCap {
+			pageNotifications = pageNotifications[:remainingCap]
+		}
+		notifications = append(notifications, pageNotifications...)
+		if len(pageNotifications) < notificationPageSize {
+			break
+		}
+	}
+	notificationItems := make([]model.Item, 0, len(notifications))
+	for index, notification := range notifications {
+		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(notifications), Phase: "notification details", Step: detailStep, Total: total})
+		notificationItems = append(notificationItems, c.restNotificationItem(ctx, notification))
+	}
+	return notificationItems, warning, nil
 }
 
 func (c *Client) restNotificationItem(ctx context.Context, n restNotification) model.Item {
@@ -432,6 +471,9 @@ func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string,
 		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())
+			if errors.Is(err, errGraphQLRateLimitExhausted) {
+				break
+			}
 			continue
 		}
 		warning = joinWarning(warning, queryWarning)
@@ -491,6 +533,40 @@ func mergeItems(base, incoming []model.Item) []model.Item {
 	return merged
 }
 
+func mergeShortImportantItems(existing, changed []model.Item, me string) []model.Item {
+	items := append([]model.Item(nil), existing...)
+	index := make(map[string]int, len(items))
+	threadIndex := make(map[string]int, len(items))
+	for i, item := range items {
+		index[item.Key] = i
+		if item.NotificationThreadID != "" {
+			threadIndex[item.NotificationThreadID] = i
+		}
+	}
+	for _, item := range changed {
+		existingIndex, ok := index[item.Key]
+		if !ok && item.NotificationThreadID != "" {
+			existingIndex, ok = threadIndex[item.NotificationThreadID]
+		}
+		if ok {
+			item = mergeItem(item, items[existingIndex])
+			items[existingIndex] = item.WithFeed(model.FeedImportantNotifications)
+			index[item.Key] = existingIndex
+			continue
+		}
+		if !filter.Important(item, me) {
+			continue
+		}
+		item = item.WithFeed(model.FeedImportantNotifications)
+		index[item.Key] = len(items)
+		if item.NotificationThreadID != "" {
+			threadIndex[item.NotificationThreadID] = len(items)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func mergeItem(base, incoming model.Item) model.Item {
 	if base.AuthorLogin == "" {
 		base.AuthorLogin = incoming.AuthorLogin
@@ -518,6 +594,15 @@ func mergeItem(base, incoming model.Item) model.Item {
 	}
 	if base.NotificationReason == "" {
 		base.NotificationReason = incoming.NotificationReason
+	}
+	if base.NotificationThreadID == "" {
+		base.NotificationThreadID = incoming.NotificationThreadID
+	}
+	if base.Read == nil {
+		base.Read = incoming.Read
+	}
+	if base.Saved == nil {
+		base.Saved = incoming.Saved
 	}
 	if base.Title == "" {
 		base.Title = incoming.Title
@@ -638,8 +723,11 @@ func (c *Client) graphQL(ctx context.Context, query string, variables map[string
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries+1; attempt++ {
 		var envelope graphQLEnvelope
-		raw, err := c.do(ctx, http.MethodPost, endpoint, "application/json", bytes.NewReader(body))
+		raw, headers, err := c.doWithHeaders(ctx, http.MethodPost, endpoint, "application/json", bytes.NewReader(body))
 		if err != nil {
+			if rateLimitExhausted(headers) {
+				return fmt.Errorf("%w: %w", errGraphQLRateLimitExhausted, err)
+			}
 			return err
 		}
 		if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -652,10 +740,16 @@ func (c *Client) graphQL(ctx context.Context, query string, variables map[string
 			return nil
 		}
 		lastErr = fmt.Errorf("graphql error: %s", envelope.Errors[0].Message)
+		if rateLimitExhausted(headers) {
+			return fmt.Errorf("%w: %w", errGraphQLRateLimitExhausted, lastErr)
+		}
 		if attempt > maxRetries || !retryableGraphQLError(envelope.Errors[0]) {
 			break
 		}
 		delay := retryDelay(attempt + 1)
+		if retryAfter := retryAfterDelay(headers); retryAfter > delay {
+			delay = retryAfter
+		}
 		if err := c.retrySleep(ctx, delay); err != nil {
 			return fmt.Errorf("retry wait canceled after %s: %w", delay, err)
 		}
@@ -692,11 +786,6 @@ func (c *Client) rest(ctx context.Context, method, endpoint string, body io.Read
 		return remaining(headers), fmt.Errorf("decode REST response: %w", err)
 	}
 	return remaining(headers), nil
-}
-
-func (c *Client) do(ctx context.Context, method, endpoint, contentType string, body io.Reader) ([]byte, error) {
-	raw, _, err := c.doWithHeaders(ctx, method, endpoint, contentType, body)
-	return raw, err
 }
 
 func (c *Client) doWithHeaders(ctx context.Context, method, endpoint, contentType string, body io.Reader) ([]byte, http.Header, error) {
@@ -796,6 +885,9 @@ func retryable(err error, headers http.Header) bool {
 	if err == nil {
 		return false
 	}
+	if rateLimitExhausted(headers) {
+		return false
+	}
 	var status statusError
 	if errors.As(err, &status) {
 		switch status.code {
@@ -827,6 +919,10 @@ func retryable(err error, headers http.Header) bool {
 		strings.Contains(message, "connection reset") ||
 		strings.Contains(message, "temporary failure") ||
 		strings.Contains(message, "server closed idle connection")
+}
+
+func rateLimitExhausted(headers http.Header) bool {
+	return headers != nil && strings.TrimSpace(headers.Get("X-Ratelimit-Remaining")) == "0"
 }
 
 func retryAfterDelay(headers http.Header) time.Duration {

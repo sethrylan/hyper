@@ -3,6 +3,8 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,29 @@ import (
 
 	"github.com/sethrylan/hyper/internal/model"
 )
+
+func TestRateLimitsUsesRESTOnly(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Method != http.MethodGet || req.URL.Path != "/rate_limit" {
+			t.Fatalf("request = %s %s, want GET /rate_limit", req.Method, req.URL.Path)
+		}
+		return jsonResponse(`{"resources":{"core":{"limit":5000,"used":10,"remaining":4990,"reset":100},"graphql":{"limit":5000,"used":5000,"remaining":0,"reset":200},"search":{"limit":30,"used":2,"remaining":28,"reset":300}}}`), nil
+	})}
+
+	limits, err := client.RateLimits(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 REST request", calls)
+	}
+	if limits.GraphQL.Limit != 5000 || limits.GraphQL.Used != 5000 || limits.GraphQL.Remaining != 0 || !limits.GraphQL.ResetAt.Equal(time.Unix(200, 0)) {
+		t.Fatalf("GraphQL limits = %#v, want exhausted REST resource", limits.GraphQL)
+	}
+}
 
 func TestRetryDelay(t *testing.T) {
 	tests := map[int]time.Duration{
@@ -118,6 +143,205 @@ func TestDoWithHeadersRetriesContextDeadlineExceeded(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2", calls)
+	}
+}
+
+func TestGraphQLDoesNotRetryExhaustedPrimaryRateLimit(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		response := jsonResponse(`{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
+		response.Header.Set("X-Ratelimit-Remaining", "0")
+		response.Header.Set("X-Ratelimit-Reset", "9999999999")
+		return response, nil
+	})}
+	client.retrySleep = func(context.Context, time.Duration) error {
+		t.Fatal("unexpected retry sleep")
+		return nil
+	}
+
+	err := client.graphQL(t.Context(), `query { viewer { login } }`, nil, &struct{}{})
+	if !errors.Is(err, errGraphQLRateLimitExhausted) {
+		t.Fatalf("error = %v, want exhausted rate limit", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestGraphQLDoesNotRetryHTTPPrimaryRateLimit(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		response := jsonResponse(`{"message":"API rate limit exceeded"}`)
+		response.Status = "403 Forbidden"
+		response.StatusCode = http.StatusForbidden
+		response.Header.Set("X-Ratelimit-Remaining", "0")
+		return response, nil
+	})}
+	client.retrySleep = func(context.Context, time.Duration) error {
+		t.Fatal("unexpected retry sleep")
+		return nil
+	}
+
+	err := client.graphQL(t.Context(), `query { viewer { login } }`, nil, &struct{}{})
+	if !errors.Is(err, errGraphQLRateLimitExhausted) {
+		t.Fatalf("error = %v, want exhausted rate limit", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestSupplementalSearchStopsWhenGraphQLRateLimitIsExhausted(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		response := jsonResponse(`{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
+		response.Header.Set("X-Ratelimit-Remaining", "0")
+		return response, nil
+	})}
+	client.retrySleep = func(context.Context, time.Duration) error {
+		t.Fatal("unexpected retry sleep")
+		return nil
+	}
+
+	_, warning := client.fetchSupplementalImportantItems(t.Context(), "me", time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC))
+	if calls != 1 {
+		t.Fatalf("calls = %d, want supplemental search to stop after 1", calls)
+	}
+	if !strings.Contains(warning, "rate limit exhausted") {
+		t.Fatalf("warning = %q, want exhausted rate limit", warning)
+	}
+}
+
+func TestNotificationPaginationUsesFiftyItemPagesAndSince(t *testing.T) {
+	var pages []string
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/notifications" {
+			t.Fatalf("path = %q, want /notifications", req.URL.Path)
+		}
+		if got := req.URL.Query().Get("per_page"); got != "50" {
+			t.Fatalf("per_page = %q, want 50", got)
+		}
+		if got := req.URL.Query().Get("since"); got != "2026-08-07T15:03:04Z" {
+			t.Fatalf("since = %q, want one-second overlap", got)
+		}
+		page := req.URL.Query().Get("page")
+		pages = append(pages, page)
+		if page == "1" {
+			return notificationPage(50), nil
+		}
+		return notificationPage(1), nil
+	})}
+
+	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC), 1, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 51 {
+		t.Fatalf("items = %d, want 51", len(items))
+	}
+	if strings.Join(pages, ",") != "1,2" {
+		t.Fatalf("pages = %v, want [1 2]", pages)
+	}
+}
+
+func TestNotificationPaginationStopsAtCap(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return notificationPage(50), nil
+	})}
+
+	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Time{}, 1, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != maxNotifications || calls != maxNotifications/notificationPageSize {
+		t.Fatalf("items/calls = %d/%d, want %d/%d", len(items), calls, maxNotifications, maxNotifications/notificationPageSize)
+	}
+}
+
+func TestRefreshNotificationsIsRESTOnlyAndAdditive(t *testing.T) {
+	updated := time.Date(2026, 8, 7, 15, 4, 0, 0, time.UTC)
+	existing := model.Item{
+		Host:        "github.com",
+		Key:         model.StableKey("github.com", "PR_1", "", ""),
+		NodeID:      "PR_1",
+		Reviewers:   []string{"me"},
+		SourceFeeds: []model.Feed{model.FeedImportantNotifications},
+		Title:       "old title",
+	}
+	retained := model.Item{
+		Host:        "github.com",
+		Key:         "github.com|retained",
+		SourceFeeds: []model.Feed{model.FeedImportantNotifications},
+		Title:       "retained",
+	}
+
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/notifications":
+			return jsonValueResponse([]restNotification{
+				{ID: "1", Reason: "subscribed", Subject: restSubject{Title: "new title", Type: "PullRequest", URL: "https://api.github.com/repos/owner/repo/pulls/1"}, UpdatedAt: updated},
+				{ID: "2", Reason: "mention", Subject: restSubject{Title: "mentioned"}, UpdatedAt: updated},
+			}), nil
+		case "/repos/owner/repo/pulls/1":
+			return jsonValueResponse(restSubjectDetail{HTMLURL: "https://github.com/owner/repo/pull/1", NodeID: "PR_1", UpdatedAt: updated}), nil
+		case "/graphql":
+			t.Fatal("short refresh made a GraphQL request")
+			return nil, nil
+		default:
+			t.Fatalf("unexpected request path %q", req.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
+		Account:  "me",
+		Existing: []model.Item{existing, retained},
+		Since:    time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %d, want updated, retained, and new mention", len(result.Items))
+	}
+	if result.Items[0].Title != "new title" || !containsFoldForTest(result.Items[0].Reviewers, "me") {
+		t.Fatalf("updated item = %#v, want fresh REST fields plus cached reviewer", result.Items[0])
+	}
+	if result.Items[1].Key != retained.Key {
+		t.Fatalf("retained item = %#v, want existing item preserved", result.Items[1])
+	}
+}
+
+func TestShortMergeMatchesNotificationThreadWhenDetailIsUnavailable(t *testing.T) {
+	existing := model.Item{
+		Host:                 "github.com",
+		Key:                  "github.com|PR_1",
+		NodeID:               "PR_1",
+		NotificationThreadID: "thread-1",
+		Reviewers:            []string{"me"},
+		Title:                "old",
+	}
+	changed := model.Item{
+		Host:                 "github.com",
+		Key:                  "github.com|https://api.github.com/repos/owner/repo/pulls/1",
+		NotificationThreadID: "thread-1",
+		Title:                "new",
+	}
+
+	items := mergeShortImportantItems([]model.Item{existing}, []model.Item{changed}, "me")
+	if len(items) != 1 || items[0].Key != existing.Key || items[0].Title != "new" {
+		t.Fatalf("items = %#v, want one updated item matched by notification thread", items)
 	}
 }
 
@@ -261,6 +485,19 @@ func jsonResponse(body string) *http.Response {
 	}
 }
 
+func jsonValueResponse(value any) *http.Response {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return jsonResponse(string(raw))
+}
+
+func notificationPage(count int) *http.Response {
+	notifications := make([]restNotification, count)
+	return jsonValueResponse(notifications)
+}
+
 func emptySearchResponse() *http.Response {
 	return jsonResponse(`{"data":{"rateLimit":{"remaining":500},"search":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`)
 }
@@ -287,6 +524,15 @@ func (r *stringReader) Read(p []byte) (int, error) {
 func containsString(values []supplementalImportantQuery, needle string) bool {
 	for _, value := range values {
 		if value.Query == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFoldForTest(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, needle) {
 			return true
 		}
 	}
