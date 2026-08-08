@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -48,12 +47,16 @@ func runDemo() error {
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
-	store, err := cache.Open(filepath.Join(tempDir, "cache.json"))
+	cachePath := filepath.Join(tempDir, "cache.json")
+	if writeErr := os.WriteFile(cachePath, demo.CacheJSON(), 0o600); writeErr != nil {
+		return fmt.Errorf("seed demo cache: %w", writeErr)
+	}
+	store, err := cache.Open(cachePath)
 	if err != nil {
 		return fmt.Errorf("open demo cache: %w", err)
 	}
 
-	return runProgram(tui.New(demo.NewFixtureClient(time.Now()), store, "github.com"))
+	return runProgram(tui.NewCached(store, "github.com"))
 }
 
 func runProgram(model tui.Model) error {
