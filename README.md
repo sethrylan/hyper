@@ -1,6 +1,5 @@
 # hyper
 
-[![Latest Release](https://img.shields.io/github/release/sethrylan/hyper.svg)](https://github.com/sethrylan/hyper/releases)
 [![CI](https://github.com/sethrylan/hyper/workflows/CI/badge.svg)](https://github.com/sethrylan/hyper/actions)
 
 A terminal UI for your GitHub work queue: important notifications, open PRs, and open issues — grouped by repo, updated in real time.
