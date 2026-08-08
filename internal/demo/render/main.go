@@ -29,11 +29,7 @@ var frames = []struct {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: go run ./internal/demo/render OUTPUT_GIF FRAME_DIRECTORY")
-		os.Exit(2)
-	}
-	if err := render(os.Args[1], os.Args[2]); err != nil {
+	if err := render("docs/demo.gif", "docs"); err != nil {
 		fmt.Fprintf(os.Stderr, "render demo GIF: %v\n", err)
 		os.Exit(1)
 	}

@@ -25,4 +25,4 @@ cd "$REPO_ROOT"
 mkdir -p "$DEMO_TMP_DIR/bin"
 go build -o "$DEMO_TMP_DIR/bin/hyper" ./cmd/hyper
 PATH="$DEMO_TMP_DIR/bin:$PATH" vhs docs/demo.tape
-go run ./internal/demo/render docs/demo.gif docs
+go run ./internal/demo/render
