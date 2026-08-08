@@ -11,32 +11,32 @@ import (
 )
 
 const (
-	account = "sethrylan"
+	account = "mona"
 	host    = "github.com"
 )
 
 var refreshedAt = time.Date(2000, time.January, 1, 15, 4, 0, 0, time.UTC)
 
-// Service implements the TUI's GitHub service contract with deterministic fixtures.
-type Service struct {
+// FixtureClient implements the TUI's GitHub service contract with deterministic fixtures.
+type FixtureClient struct {
 	feeds map[model.Feed][]model.Item
 }
 
-// New creates a fixture service whose item ages are relative to now.
-func New(now time.Time) *Service {
+// NewFixtureClient creates a fixture client whose item ages are relative to now.
+func NewFixtureClient(now time.Time) *FixtureClient {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	return &Service{feeds: fixtureFeeds(now)}
+	return &FixtureClient{feeds: fixtureFeeds(now)}
 }
 
 // CurrentProgress returns no progress because fixture refreshes complete immediately.
-func (*Service) CurrentProgress() github.RefreshProgress {
+func (*FixtureClient) CurrentProgress() github.RefreshProgress {
 	return github.RefreshProgress{}
 }
 
 // RateLimits returns stable, healthy sample quotas.
-func (*Service) RateLimits(ctx context.Context) (github.RateLimits, error) {
+func (*FixtureClient) RateLimits(ctx context.Context) (github.RateLimits, error) {
 	if err := ctx.Err(); err != nil {
 		return github.RateLimits{}, err
 	}
@@ -48,7 +48,7 @@ func (*Service) RateLimits(ctx context.Context) (github.RateLimits, error) {
 }
 
 // Refresh returns a fresh copy of every demo feed.
-func (s *Service) Refresh(ctx context.Context) (github.RefreshResult, error) {
+func (s *FixtureClient) Refresh(ctx context.Context) (github.RefreshResult, error) {
 	if err := ctx.Err(); err != nil {
 		return github.RefreshResult{}, err
 	}
@@ -60,7 +60,7 @@ func (s *Service) Refresh(ctx context.Context) (github.RefreshResult, error) {
 }
 
 // RefreshNotifications returns a fresh copy of the Important Notifications fixtures.
-func (s *Service) RefreshNotifications(ctx context.Context, _ github.NotificationRefreshRequest) (github.NotificationRefreshResult, error) {
+func (s *FixtureClient) RefreshNotifications(ctx context.Context, _ github.NotificationRefreshRequest) (github.NotificationRefreshResult, error) {
 	if err := ctx.Err(); err != nil {
 		return github.NotificationRefreshResult{}, err
 	}
@@ -73,12 +73,12 @@ func (s *Service) RefreshNotifications(ctx context.Context, _ github.Notificatio
 
 func fixtureFeeds(now time.Time) map[model.Feed][]model.Item {
 	hyperSelection := fixtureItem(now, "PR_demo_hyper_selection", "sethrylan", "hyper", 9001,
-		"Keep selection stable after refresh", model.ItemTypePullRequest, "sethrylan", -18*time.Minute)
+		"Keep selection stable after refresh", model.ItemTypePullRequest, account, -18*time.Minute)
 	hyperSelection.NotificationReason = "author"
 	hyperSelection = withFeeds(hyperSelection, model.FeedImportantNotifications, model.FeedMyPullRequests)
 
 	hyperDone := fixtureItem(now, "I_demo_hyper_done", "sethrylan", "hyper", 9002,
-		"Document local done behavior", model.ItemTypeIssue, "sethrylan", -2*time.Hour)
+		"Document local done behavior", model.ItemTypeIssue, account, -2*time.Hour)
 	hyperDone.Assignees = []string{account}
 	hyperDone.NotificationReason = "mention"
 	hyperDone = withFeeds(hyperDone, model.FeedImportantNotifications, model.FeedMyIssues)

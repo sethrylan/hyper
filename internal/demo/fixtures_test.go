@@ -13,13 +13,13 @@ import (
 
 func TestRefreshReturnsCuratedMultiRepoFeeds(t *testing.T) {
 	now := time.Date(2026, time.August, 7, 12, 0, 0, 0, time.UTC)
-	result, err := demo.New(now).Refresh(t.Context())
+	result, err := demo.NewFixtureClient(now).Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantRefreshedAt := time.Date(2000, time.January, 1, 15, 4, 0, 0, time.UTC)
-	if result.Account != "sethrylan" || !result.RefreshedAt.Equal(wantRefreshedAt) {
-		t.Fatalf("account/refreshed = %q/%s, want sethrylan/%s", result.Account, result.RefreshedAt, wantRefreshedAt)
+	if result.Account != "mona" || !result.RefreshedAt.Equal(wantRefreshedAt) {
+		t.Fatalf("account/refreshed = %q/%s, want mona/%s", result.Account, result.RefreshedAt, wantRefreshedAt)
 	}
 
 	wantCounts := map[model.Feed]int{
@@ -56,15 +56,15 @@ func TestRefreshReturnsCuratedMultiRepoFeeds(t *testing.T) {
 }
 
 func TestRefreshReturnsDeepCopies(t *testing.T) {
-	service := demo.New(time.Now())
-	first, err := service.Refresh(t.Context())
+	client := demo.NewFixtureClient(time.Now())
+	first, err := client.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.Feeds[model.FeedImportantNotifications][0].Title = "changed"
 	first.Feeds[model.FeedImportantNotifications][0].SourceFeeds[0] = model.FeedMyIssues
 
-	second, err := service.Refresh(t.Context())
+	second, err := client.Refresh(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,15 +75,15 @@ func TestRefreshReturnsDeepCopies(t *testing.T) {
 }
 
 func TestRefreshNotificationsIgnoresIncomingState(t *testing.T) {
-	service := demo.New(time.Now())
-	result, err := service.RefreshNotifications(t.Context(), github.NotificationRefreshRequest{
+	client := demo.NewFixtureClient(time.Now())
+	result, err := client.RefreshNotifications(t.Context(), github.NotificationRefreshRequest{
 		Account:  "someone-else",
 		Existing: []model.Item{{Title: "unexpected"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Account != "sethrylan" || len(result.Items) != 6 || result.Items[0].Title == "unexpected" {
+	if result.Account != "mona" || len(result.Items) != 6 || result.Items[0].Title == "unexpected" {
 		t.Fatalf("notification refresh = %#v, want canonical demo fixtures", result)
 	}
 }
@@ -91,14 +91,14 @@ func TestRefreshNotificationsIgnoresIncomingState(t *testing.T) {
 func TestCanceledRequestsFail(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	service := demo.New(time.Now())
-	if _, err := service.Refresh(ctx); err == nil {
+	client := demo.NewFixtureClient(time.Now())
+	if _, err := client.Refresh(ctx); err == nil {
 		t.Fatal("Refresh succeeded with a canceled context")
 	}
-	if _, err := service.RefreshNotifications(ctx, github.NotificationRefreshRequest{}); err == nil {
+	if _, err := client.RefreshNotifications(ctx, github.NotificationRefreshRequest{}); err == nil {
 		t.Fatal("RefreshNotifications succeeded with a canceled context")
 	}
-	if _, err := service.RateLimits(ctx); err == nil {
+	if _, err := client.RateLimits(ctx); err == nil {
 		t.Fatal("RateLimits succeeded with a canceled context")
 	}
 }

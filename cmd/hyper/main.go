@@ -53,7 +53,7 @@ func runDemo() error {
 		return fmt.Errorf("open demo cache: %w", err)
 	}
 
-	return runProgram(tui.New(demo.New(time.Now()), store, "github.com"))
+	return runProgram(tui.New(demo.NewFixtureClient(time.Now()), store, "github.com"))
 }
 
 func runProgram(model tui.Model) error {
