@@ -72,12 +72,12 @@ func (s *FixtureClient) RefreshNotifications(ctx context.Context, _ github.Notif
 }
 
 func fixtureFeeds(now time.Time) map[model.Feed][]model.Item {
-	hyperSelection := fixtureItem(now, "PR_demo_hyper_selection", "sethrylan", "hyper", 9001,
+	hyperSelection := fixtureItem(now, "PR_demo_hyper_selection", account, "hyper", 9001,
 		"Keep selection stable after refresh", model.ItemTypePullRequest, account, -18*time.Minute)
 	hyperSelection.NotificationReason = "author"
 	hyperSelection = withFeeds(hyperSelection, model.FeedImportantNotifications, model.FeedMyPullRequests)
 
-	hyperDone := fixtureItem(now, "I_demo_hyper_done", "sethrylan", "hyper", 9002,
+	hyperDone := fixtureItem(now, "I_demo_hyper_done", account, "hyper", 9002,
 		"Document local done behavior", model.ItemTypeIssue, account, -2*time.Hour)
 	hyperDone.Assignees = []string{account}
 	hyperDone.NotificationReason = "mention"
@@ -110,7 +110,7 @@ func fixtureFeeds(now time.Time) map[model.Feed][]model.Item {
 	k6Tags.StateReason = "not_planned"
 	k6Tags = withFeeds(k6Tags, model.FeedImportantNotifications)
 
-	hyperRateLimits := fixtureItem(now, "PR_demo_hyper_rate_limits", "sethrylan", "hyper", 9003,
+	hyperRateLimits := fixtureItem(now, "PR_demo_hyper_rate_limits", account, "hyper", 9003,
 		"Add a rate-limit detail view", model.ItemTypePullRequest, account, -3*time.Hour)
 	hyperRateLimits = withFeeds(hyperRateLimits, model.FeedMyPullRequests)
 
@@ -127,7 +127,7 @@ func fixtureFeeds(now time.Time) map[model.Feed][]model.Item {
 	k6ScenarioDocs.Draft = true
 	k6ScenarioDocs = withFeeds(k6ScenarioDocs, model.FeedMyPullRequests)
 
-	hyperRefresh := fixtureItem(now, "I_demo_hyper_refresh", "sethrylan", "hyper", 9004,
+	hyperRefresh := fixtureItem(now, "I_demo_hyper_refresh", account, "hyper", 9004,
 		"Support configurable refresh intervals", model.ItemTypeIssue, account, -7*time.Hour)
 	hyperRefresh = withFeeds(hyperRefresh, model.FeedMyIssues)
 

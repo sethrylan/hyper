@@ -40,7 +40,7 @@ func TestRefreshReturnsCuratedMultiRepoFeeds(t *testing.T) {
 			t.Fatalf("item %q is missing Important source feed", item.Title)
 		}
 	}
-	for _, want := range []string{"grafana/grafana", "grafana/k6", "sethrylan/hyper"} {
+	for _, want := range []string{"grafana/grafana", "grafana/k6", "mona/hyper"} {
 		if !repositories[want] {
 			t.Fatalf("Important fixtures are missing repository %q", want)
 		}
