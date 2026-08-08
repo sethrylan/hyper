@@ -1,0 +1,50 @@
+name: demo
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/demo.yml"
+      - "cmd/hyper/**"
+      - "docs/demo-setup.sh"
+      - "docs/demo.tape"
+      - "docs/demo.gif"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        description: "Pull request number to render"
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.3
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
+      - uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Install VHS
+        uses: charmbracelet/vhs-action@59641cdc7fadf3978db65eb8c6937ea2752f4ec3 # v2.1.0
+        with:
+          version: v0.11.0
+      - name: Render demo
+        run: ./docs/demo-setup.sh
+      - name: Verify committed demo
+        run: git diff --exit-code -- docs/demo.gif
+      - name: Upload rendered demo
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: hyper-demo
+          path: docs/demo.gif
+          if-no-files-found: error
