@@ -20,12 +20,19 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Get PR head ref
+      - name: Get same-repository PR head
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          pr_json=$(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }})
+          pr_json=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")
+          head_repository=$(echo "$pr_json" | jq -r '.head.repo.full_name // empty')
+          if [[ "$head_repository" != "$REPOSITORY" ]]; then
+            echo "::error::Demo generation only supports pull requests from ${REPOSITORY}."
+            exit 1
+          fi
           head_ref=$(echo "$pr_json" | jq -r '.head.ref')
           head_sha=$(echo "$pr_json" | jq -r '.head.sha')
           echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
@@ -60,13 +67,15 @@ jobs:
         run: docs/demo-setup.sh
 
       - name: Commit updated demo GIF
+        env:
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/demo.gif
           if ! git diff --cached --quiet; then
             git commit -m "chore: update demo.gif"
-            git push origin HEAD:${{ steps.pr.outputs.head_ref }}
+            git push origin "HEAD:${HEAD_REF}"
           fi
 
       - name: Post demo comment
