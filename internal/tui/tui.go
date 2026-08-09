@@ -105,6 +105,19 @@ type rateLimitsMsg struct {
 }
 
 func New(service service, store *cache.Store, host string) Model {
+	return newModel(service, store, host)
+}
+
+// NewCached creates a model that reads and writes cache state without contacting GitHub.
+func NewCached(store *cache.Store, host string) Model {
+	m := newModel(nil, store, host)
+	if refreshedAt := store.Data().LastRefresh; !refreshedAt.IsZero() {
+		m.status = "refreshed " + refreshedAt.Format(time.Kitchen)
+	}
+	return m
+}
+
+func newModel(service service, store *cache.Store, host string) Model {
 	data := store.Data()
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
@@ -116,7 +129,7 @@ func New(service service, store *cache.Store, host string) Model {
 		feeds:             feedsFromCache(data),
 		host:              host,
 		lastFullRefreshAt: now,
-		loading:           true,
+		loading:           service != nil,
 		loadingAt:         now,
 		selectedByFeed:    map[model.Feed]int{},
 		service:           service,
@@ -131,7 +144,11 @@ func New(service service, store *cache.Store, host string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestWindowSize, tea.RequestBackgroundColor, m.startRefreshCmd(refreshFull), tickCmd())
+	cmds := []tea.Cmd{tea.RequestWindowSize, tea.RequestBackgroundColor}
+	if m.service != nil {
+		cmds = append(cmds, m.startRefreshCmd(refreshFull), tickCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -178,6 +195,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "notifications refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case tickMsg:
+		if m.service == nil {
+			return m, nil
+		}
 		cmds := []tea.Cmd{tickCmd()}
 		if !m.loading {
 			kind := m.automaticRefreshKind(msg.at)
@@ -190,7 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	case progressTickMsg:
-		if m.loading {
+		if m.loading && m.service != nil {
 			m.spinner++
 			m.refreshProgress = m.service.CurrentProgress()
 			return m, progressTickCmd()
@@ -239,6 +259,10 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 	case ActionOpen:
 		return m.openSelected()
 	case ActionRefresh:
+		if m.service == nil {
+			m.status = "cache-only mode"
+			return m, nil
+		}
 		if !m.loading {
 			now := time.Now()
 			m.lastFullRefreshAt = now
@@ -247,6 +271,10 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 			return m, m.startRefreshCmd(refreshFull)
 		}
 	case ActionRateLimits:
+		if m.service == nil {
+			m.status = "cache-only mode"
+			return m, nil
+		}
 		if m.showRateLimits {
 			m.showRateLimits = false
 			return m, nil
@@ -586,7 +614,11 @@ func (m Model) renderFooterHelp() string {
 	if m.localDoneEnabled() {
 		parts = append(parts, "E done")
 	}
-	parts = append(parts, "y copy", "o/enter open", "r refresh", "? help", "q quit")
+	parts = append(parts, "y copy", "o/enter open")
+	if m.service != nil {
+		parts = append(parts, "r refresh")
+	}
+	parts = append(parts, "? help", "q quit")
 	return strings.Join(parts, "  ")
 }
 
@@ -719,7 +751,7 @@ func (m Model) renderStatus() string {
 }
 
 func (m Model) renderHelp() string {
-	return strings.Join([]string{
+	lines := []string{
 		titleStyle().Render("hyper help"),
 		"",
 		"j/down        select next visible item",
@@ -729,13 +761,17 @@ func (m Model) renderHelp() string {
 		"E             toggle local done in Important Notifications",
 		"y             copy selected item URL",
 		"o/enter       open selected item URL",
-		"r             refresh",
-		"shift+r       show rate limits",
+	}
+	if m.service != nil {
+		lines = append(lines, "r             refresh", "shift+r       show rate limits")
+	}
+	lines = append(lines,
 		"tab           next feed",
 		"shift+tab     previous feed",
 		"?             close help",
 		"q/Ctrl+C      quit",
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderRateLimits() string {
