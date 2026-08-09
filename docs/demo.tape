@@ -19,48 +19,61 @@ Wait+Screen /refreshed 3:04PM/
 Show
 Sleep 1500ms
 
-Hide
 Type "E"
 Wait+Screen /marked done/
-Show
-Sleep 1500ms
+Sleep 800ms
 
-Hide
-Type "hh"
-Wait+Screen /▸ grafana/
-Show
-Sleep 1s
-
-Hide
-Type "l"
-Wait+Screen /Add service account support/
-Show
-Sleep 1500ms
-
-Hide
-Tab
-Down 2
-Wait+Screen />.*Document per-scenario/
-Show
-Sleep 2s
-
-Hide
-Tab
 Down
-Wait+Screen />.*Expose retry counts/
-Show
-Sleep 2s
+Sleep 500ms
+Type "E"
+Wait+Screen /marked done/
+Sleep 800ms
 
-Hide
-Type "?"
-Wait+Screen /hyper help/
-Show
-Sleep 2500ms
+Down
+Sleep 500ms
+Type "E"
+Wait+Screen /marked done/
+Sleep 800ms
 
-Hide
-Type "?"
-Wait+Screen /Expose retry counts/
-Show
+Down
+Sleep 500ms
+Type "E"
+Wait+Screen /marked done/
+Sleep 800ms
+
+Down
+Sleep 800ms
+Type "h"
+Sleep 500ms
+Type "h"
+Wait+Screen /▸ mona\/hyper/
+Sleep 1s
+Type "l"
+Wait+Screen />.*Keep selection stable after refresh/
+Sleep 1200ms
+
+Tab
+Wait+Screen /My Pull Requests \(5\)/
+Sleep 1200ms
+Down
+Sleep 600ms
+Down
+Sleep 600ms
+Down
+Sleep 600ms
+Down
+Wait+Screen />.*Add a rate-limit detail view/
+Sleep 1200ms
+
+Tab
+Wait+Screen /My Issues \(4\)/
+Sleep 1200ms
+Down
+Sleep 600ms
+Down
+Sleep 600ms
+Down
+Wait+Screen />.*Support configurable refresh intervals/
 Sleep 1500ms
 
 Hide
