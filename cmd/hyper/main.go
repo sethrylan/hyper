@@ -8,6 +8,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sethrylan/hyper/internal/auth"
+	"github.com/sethrylan/hyper/internal/autoupdate"
+	"github.com/sethrylan/hyper/internal/buildinfo"
 	"github.com/sethrylan/hyper/internal/cache"
 	"github.com/sethrylan/hyper/internal/demo"
 	"github.com/sethrylan/hyper/internal/github"
@@ -15,6 +17,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		_, _ = fmt.Fprintln(os.Stdout, buildinfo.String())
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "hyper: %v\n", err)
 		os.Exit(1)
@@ -37,7 +43,21 @@ func run() error {
 	}
 
 	client := github.NewClient(ctx.Host, ctx.Token)
+	if updater := releaseUpdater(ctx.Token); updater != nil {
+		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
+	}
 	return runProgram(tui.New(client, store, ctx.Host))
+}
+
+func releaseUpdater(token string) *autoupdate.Service {
+	if !buildinfo.IsRelease() || os.Getenv("HYPER_NO_UPDATE") == "1" {
+		return nil
+	}
+	updater, err := autoupdate.New(token, buildinfo.Version())
+	if err != nil {
+		return nil
+	}
+	return updater
 }
 
 func runDemo() error {

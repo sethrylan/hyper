@@ -2,17 +2,33 @@
 
 [![CI](https://github.com/sethrylan/hyper/workflows/CI/badge.svg)](https://github.com/sethrylan/hyper/actions)
 
-A terminal UI for your GitHub work queue: important notifications, open PRs, and open issues — grouped by repo, updated in real time.
+A terminal UI for your GitHub work queue: important notifications, open PRs, and open issues, grouped by repo and updated in real time.
 
 ![demo](docs/demo.gif)
 
 ## Install
 
-Download the [latest release](https://github.com/sethrylan/hyper/releases), or:
+Release installs are recommended.
+
+```sh
+curl -fsSL https://github.com/sethrylan/hyper/releases/latest/download/install.sh | sh
+```
+
+Add `~/.local/bin` to your `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+You can opt out of automatic checks for a launch with `HYPER_NO_UPDATE=1 hyper`.
+
+Alternatively, install from source with Go:
 
 ```sh
 go install github.com/sethrylan/hyper/cmd/hyper@latest
 ```
+
+Source installs do not auto-update; rerun the command to upgrade. Check any installation with `hyper --version`.
 
 Requires [GitHub CLI](https://cli.github.com/) authentication:
 

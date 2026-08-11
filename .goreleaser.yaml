@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 before:
   hooks:
@@ -6,22 +6,40 @@ before:
     - go generate ./...
 
 builds:
-  - env:
+  - id: hyper
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
       - darwin
+    goarch:
+      - amd64
+      - arm64
+      - 386
+    ignore:
+      - goos: darwin
+        goarch: 386
     main: ./cmd/hyper
+    ldflags:
+      - -s -w
+      - -X github.com/sethrylan/hyper/internal/buildinfo.version={{ .Version }}
+      - -X github.com/sethrylan/hyper/internal/buildinfo.distribution=release
 
 archives:
-  - format: tar.gz
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
+  - ids:
+      - hyper
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+
+checksum:
+  name_template: hyper_checksums.txt
+  extra_files:
+    - glob: ./install.sh
+
+release:
+  extra_files:
+    - glob: ./install.sh
 
 changelog:
   sort: asc

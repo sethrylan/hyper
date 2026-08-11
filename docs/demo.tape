@@ -6,7 +6,7 @@ Set Shell "bash"
 Set FontFamily "JetBrains Mono"
 Set FontSize 16
 Set Width 1200
-Set Height 600
+Set Height 450
 Set TypingSpeed 40ms
 
 Env HYPER_DEMO "1"
