@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -18,21 +17,14 @@ import (
 )
 
 func main() {
-	if handleInformationalArgs(os.Args[1:], os.Stdout) {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		_, _ = fmt.Fprintln(os.Stdout, buildinfo.String())
 		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "hyper: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func handleInformationalArgs(args []string, output io.Writer) bool {
-	if len(args) != 1 || args[0] != "--version" {
-		return false
-	}
-	_, _ = fmt.Fprintln(output, buildinfo.String())
-	return true
 }
 
 func run() error {
