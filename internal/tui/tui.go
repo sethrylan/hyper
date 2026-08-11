@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/sethrylan/hyper/internal/autoupdate"
 	"github.com/sethrylan/hyper/internal/browser"
 	"github.com/sethrylan/hyper/internal/cache"
 	"github.com/sethrylan/hyper/internal/clipboard"
@@ -19,10 +20,11 @@ import (
 )
 
 const (
-	shortRefresh = time.Minute
-	fullRefresh  = 5 * time.Minute
-	progressTick = time.Second
-	unknownValue = "unknown"
+	shortRefresh  = time.Minute
+	fullRefresh   = 5 * time.Minute
+	progressTick  = time.Second
+	updateTimeout = 30 * time.Second
+	unknownValue  = "unknown"
 )
 
 type service interface {
@@ -30,6 +32,10 @@ type service interface {
 	RateLimits(ctx context.Context) (github.RateLimits, error)
 	Refresh(ctx context.Context) (github.RefreshResult, error)
 	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.NotificationRefreshResult, error)
+}
+
+type updateService interface {
+	Update(ctx context.Context) autoupdate.Result
 }
 
 type refreshKind int
@@ -66,6 +72,8 @@ type Model struct {
 	spinner           int
 	status            string
 	store             *cache.Store
+	updateNotice      string
+	updater           updateService
 	width             int
 }
 
@@ -104,20 +112,28 @@ type rateLimitsMsg struct {
 	err    error
 }
 
+type updateMsg struct {
+	result autoupdate.Result
+}
+
 func New(service service, store *cache.Store, host string) Model {
-	return newModel(service, store, host)
+	return newModel(service, store, host, nil)
+}
+
+func NewWithUpdater(service service, store *cache.Store, host string, updater updateService) Model {
+	return newModel(service, store, host, updater)
 }
 
 // NewCached creates a model that reads and writes cache state without contacting GitHub.
 func NewCached(store *cache.Store, host string) Model {
-	m := newModel(nil, store, host)
+	m := newModel(nil, store, host, nil)
 	if refreshedAt := store.Data().LastRefresh; !refreshedAt.IsZero() {
 		m.status = "refreshed " + refreshedAt.Format(time.Kitchen)
 	}
 	return m
 }
 
-func newModel(service service, store *cache.Store, host string) Model {
+func newModel(service service, store *cache.Store, host string, updater updateService) Model {
 	data := store.Data()
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
@@ -135,6 +151,7 @@ func newModel(service service, store *cache.Store, host string) Model {
 		service:           service,
 		status:            cacheStatus(data),
 		store:             store,
+		updater:           updater,
 	}
 	for _, feed := range model.Feeds {
 		m.expanded["feed:"+string(feed)] = true
@@ -147,6 +164,9 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tea.RequestWindowSize, tea.RequestBackgroundColor}
 	if m.service != nil {
 		cmds = append(cmds, m.startRefreshCmd(refreshFull), tickCmd())
+	}
+	if m.updater != nil {
+		cmds = append(cmds, m.updateCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -223,6 +243,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rateLimits = msg.limits
 		m.rateLimitsErr = ""
+	case updateMsg:
+		if msg.result.UpdatedVersion != "" {
+			m.updateNotice = "updated to v" + msg.result.UpdatedVersion + "; restart hyper to use it"
+		} else if msg.result.ApplyError != nil {
+			m.updateNotice = "auto-update failed: " + msg.result.ApplyError.Error() + "; reinstall from GitHub Releases"
+		}
 	}
 	return m, nil
 }
@@ -477,6 +503,14 @@ func (m Model) rateLimitsCmd() tea.Cmd {
 		defer cancel()
 		limits, err := m.service.RateLimits(ctx)
 		return rateLimitsMsg{limits: limits, err: err}
+	}
+}
+
+func (m Model) updateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, updateTimeout)
+		defer cancel()
+		return updateMsg{result: m.updater.Update(ctx)}
 	}
 }
 
@@ -746,6 +780,9 @@ func (m Model) renderStatus() string {
 	}
 	if m.rateWarning != "" {
 		status = status + " | " + m.rateWarning
+	}
+	if m.updateNotice != "" {
+		status = status + " | " + m.updateNotice
 	}
 	return statusStyle().Render(fmt.Sprintf("%s@%s | %s", account, m.host, status))
 }
