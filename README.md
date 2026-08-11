@@ -8,40 +8,16 @@ A terminal UI for your GitHub work queue: important notifications, open PRs, and
 
 ## Install
 
-Release installs are recommended: they check for stable updates in the background and install them for the next launch.
+Release installs are recommended.
 
 ```sh
 curl -fsSL https://github.com/sethrylan/hyper/releases/latest/download/install.sh | sh
 ```
 
-The installer detects macOS or Linux and installs the verified binary to `~/.local/bin`. If that directory is not on your `PATH`, add it to your shell configuration:
+Add `~/.local/bin` to your `PATH`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Set `HYPER_INSTALL_DIR` on the `sh` command to choose another user-writable directory:
-
-```sh
-curl -fsSL https://github.com/sethrylan/hyper/releases/latest/download/install.sh | HYPER_INSTALL_DIR="$HOME/bin" sh
-```
-
-To install manually, download the archive for your platform from the [latest release](https://github.com/sethrylan/hyper/releases/latest), verify it against `hyper_checksums.txt`, extract `hyper`, and move it to a user-writable directory on your `PATH`. Release archives are available for:
-
-| Platform | Architectures |
-|----------|---------------|
-| macOS | Apple Silicon (`arm64`), Intel (`amd64`) |
-| Linux | `arm64`, `amd64`, `386` |
-
-For example, on Apple Silicon:
-
-```sh
-curl -LO https://github.com/sethrylan/hyper/releases/latest/download/hyper_darwin_arm64.tar.gz
-curl -LO https://github.com/sethrylan/hyper/releases/latest/download/hyper_checksums.txt
-grep ' hyper_darwin_arm64.tar.gz$' hyper_checksums.txt | shasum -a 256 -c -
-tar -xzf hyper_darwin_arm64.tar.gz
-mkdir -p "$HOME/.local/bin"
-install -m 0755 hyper "$HOME/.local/bin/hyper"
 ```
 
 You can opt out of automatic checks for a launch with `HYPER_NO_UPDATE=1 hyper`.
