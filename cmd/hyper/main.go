@@ -43,12 +43,14 @@ func run() error {
 	}
 
 	client := github.NewClient(ctx.Host, ctx.Token)
-	updater := releaseUpdater(ctx.Token)
-	return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
+	if updater := releaseUpdater(ctx.Token); updater != nil {
+		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
+	}
+	return runProgram(tui.New(client, store, ctx.Host))
 }
 
 func releaseUpdater(token string) *autoupdate.Service {
-	if !autoUpdateEnabled(buildinfo.IsRelease(), os.Getenv("HYPER_NO_UPDATE")) {
+	if !buildinfo.IsRelease() || os.Getenv("HYPER_NO_UPDATE") == "1" {
 		return nil
 	}
 	updater, err := autoupdate.New(token, buildinfo.Version())
@@ -56,10 +58,6 @@ func releaseUpdater(token string) *autoupdate.Service {
 		return nil
 	}
 	return updater
-}
-
-func autoUpdateEnabled(release bool, optOut string) bool {
-	return release && optOut != "1"
 }
 
 func runDemo() error {

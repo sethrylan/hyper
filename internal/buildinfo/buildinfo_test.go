@@ -42,7 +42,7 @@ func TestSourceBuildNeverEnablesReleaseUpdates(t *testing.T) {
 	}
 }
 
-func TestResolveVersion(t *testing.T) {
+func TestNormalizeVersion(t *testing.T) {
 	tests := map[string]string{
 		"":        developmentVersion,
 		"(devel)": developmentVersion,
@@ -51,8 +51,8 @@ func TestResolveVersion(t *testing.T) {
 		"2.0.1":   "2.0.1",
 	}
 	for input, want := range tests {
-		if got := resolveVersion(input); got != want {
-			t.Errorf("resolveVersion(%q) = %q, want %q", input, got, want)
+		if got := normalizeVersion(input); got != want {
+			t.Errorf("normalizeVersion(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

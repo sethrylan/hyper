@@ -45,7 +45,7 @@ func Version() string {
 	if !ok {
 		return developmentVersion
 	}
-	return resolveVersion(info.Main.Version)
+	return normalizeVersion(info.Main.Version)
 }
 
 func normalizeVersion(value string) string {
@@ -54,8 +54,4 @@ func normalizeVersion(value string) string {
 		return developmentVersion
 	}
 	return strings.TrimPrefix(value, "v")
-}
-
-func resolveVersion(moduleVersion string) string {
-	return normalizeVersion(moduleVersion)
 }
