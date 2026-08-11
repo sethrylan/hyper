@@ -109,12 +109,6 @@ linters:
 
   exclusions:
     rules:
-      # Browser openers are fixed commands; the URL is passed as one argument.
-      - path: internal/browser/browser\.go
-        text: "G204:"
-        linters:
-          - gosec
-
       # Relax checks in test files
       - path: _test\.go
         linters:
