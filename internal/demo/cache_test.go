@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestCacheJSON(t *testing.T) {
 		t.Fatalf("last refresh = %s, want %s", data.LastRefresh, wantRefreshedAt)
 	}
 	wantCounts := map[model.Feed]int{
-		model.FeedImportantNotifications: 6,
+		model.FeedImportantNotifications: 7,
 		model.FeedMyPullRequests:         5,
 		model.FeedMyIssues:               4,
 	}
@@ -43,5 +44,26 @@ func TestCacheJSON(t *testing.T) {
 		if got := len(data.FeedItemIDs[feed]); got != want {
 			t.Fatalf("%s count = %d, want %d", feed, got, want)
 		}
+	}
+
+	const closedPRKey = "github.com|PR_demo_k6_legacy_flags"
+	closedPR, ok := data.Items[closedPRKey]
+	if !ok {
+		t.Fatalf("closed PR %q is missing", closedPRKey)
+	}
+	if closedPR.Type != model.ItemTypePullRequest || closedPR.State != "closed" || closedPR.Merged {
+		t.Fatalf("closed PR = %#v, want closed, unmerged pull request", closedPR)
+	}
+	if closedPR.AuthorLogin != "mona" {
+		t.Fatalf("closed PR author = %q, want mona", closedPR.AuthorLogin)
+	}
+	if !slices.Equal(closedPR.SourceFeeds, []model.Feed{model.FeedImportantNotifications}) {
+		t.Fatalf("closed PR source feeds = %v, want Important Notifications only", closedPR.SourceFeeds)
+	}
+	if !slices.Contains(data.FeedItemIDs[model.FeedImportantNotifications], closedPRKey) {
+		t.Fatal("closed PR is missing from Important Notifications")
+	}
+	if slices.Contains(data.FeedItemIDs[model.FeedMyPullRequests], closedPRKey) {
+		t.Fatal("closed PR should not appear in My Pull Requests")
 	}
 }

@@ -7,7 +7,8 @@
       "github.com|PR_demo_grafana_provisioning",
       "github.com|I_demo_grafana_variables",
       "github.com|PR_demo_k6_thresholds",
-      "github.com|I_demo_k6_tags"
+      "github.com|I_demo_k6_tags",
+      "github.com|PR_demo_k6_legacy_flags"
     ],
     "my_issues": [
       "github.com|I_demo_hyper_done",
@@ -258,6 +259,28 @@
       "type": "pull_request",
       "updated_at": "2026-08-05T19:41:10.276423-04:00",
       "url": "https://github.com/grafana/k6/pull/99007"
+    },
+    "github.com|PR_demo_k6_legacy_flags": {
+      "author_login": "mona",
+      "created_at": "2026-07-30T13:41:10.276423-04:00",
+      "host": "github.com",
+      "key": "github.com|PR_demo_k6_legacy_flags",
+      "node_id": "PR_demo_k6_legacy_flags",
+      "notification_reason": "review",
+      "read": false,
+      "repository_name": "k6",
+      "repository_owner": "grafana",
+      "reviewers": [
+        "mona"
+      ],
+      "source_feeds": [
+        "important_notifications"
+      ],
+      "state": "closed",
+      "title": "Retire legacy cloud output flags",
+      "type": "pull_request",
+      "updated_at": "2026-08-06T13:41:10.276423-04:00",
+      "url": "https://github.com/grafana/k6/pull/99010"
     },
     "github.com|PR_demo_k6_thresholds": {
       "author_login": "daniel",

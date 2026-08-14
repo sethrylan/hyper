@@ -42,6 +42,10 @@ Wait+Screen /marked done/
 Sleep 800ms
 
 Down
+Wait+Screen />.*Retire legacy/
+Sleep 1200ms
+
+Down
 Sleep 800ms
 Type "h"
 Sleep 500ms
@@ -49,7 +53,7 @@ Type "h"
 Wait+Screen /▸ mona\/hyper/
 Sleep 1s
 Type "l"
-Wait+Screen />.*Keep selection stable after refresh/
+Wait+Screen />.*Keep selection/
 Sleep 1200ms
 
 Tab
@@ -62,18 +66,18 @@ Sleep 600ms
 Down
 Sleep 600ms
 Down
-Wait+Screen />.*Add a rate-limit detail view/
+Wait+Screen />.*Add a rate/
 Sleep 1200ms
 
 Tab
-Wait+Screen /My Issues \(4\)/
+Wait+Screen /My Issues/
 Sleep 1200ms
 Down
 Sleep 600ms
 Down
 Sleep 600ms
 Down
-Wait+Screen />.*Support configurable refresh intervals/
+Wait+Screen />.*Support config/
 Sleep 1500ms
 
 Hide

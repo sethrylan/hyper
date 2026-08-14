@@ -53,10 +53,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install VHS
+      - name: Install VHS and demo font
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg ttyd
+          sudo apt install -y ffmpeg fonts-jetbrains-mono ttyd
+          test -f /usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf
           go install github.com/charmbracelet/vhs@5262b81b590d3908a9e2d63cf06603ec0d0ae78e
 
       - name: Generate demo GIF
