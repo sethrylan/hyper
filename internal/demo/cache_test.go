@@ -54,6 +54,9 @@ func TestCacheJSON(t *testing.T) {
 	if closedPR.Type != model.ItemTypePullRequest || closedPR.State != "closed" || closedPR.Merged {
 		t.Fatalf("closed PR = %#v, want closed, unmerged pull request", closedPR)
 	}
+	if closedPR.AuthorLogin != "mona" {
+		t.Fatalf("closed PR author = %q, want mona", closedPR.AuthorLogin)
+	}
 	if !slices.Equal(closedPR.SourceFeeds, []model.Feed{model.FeedImportantNotifications}) {
 		t.Fatalf("closed PR source feeds = %v, want Important Notifications only", closedPR.SourceFeeds)
 	}
