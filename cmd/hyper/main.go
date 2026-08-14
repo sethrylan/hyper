@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -16,15 +17,36 @@ import (
 	"github.com/sethrylan/hyper/internal/tui"
 )
 
+const usage = `Usage: hyper [options]
+
+Options:
+  -h, --help     Show this help
+      --version  Show version
+`
+
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		_, _ = fmt.Fprintln(os.Stdout, buildinfo.String())
+	if handleArgs(os.Args[1:], os.Stdout) {
 		return
 	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "hyper: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func handleArgs(args []string, output io.Writer) bool {
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "-h", "--help":
+		_, _ = fmt.Fprint(output, usage)
+	case "--version":
+		_, _ = fmt.Fprintln(output, buildinfo.String())
+	default:
+		return false
+	}
+	return true
 }
 
 func run() error {
