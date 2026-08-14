@@ -42,6 +42,10 @@ Wait+Screen /marked done/
 Sleep 800ms
 
 Down
+Wait+Screen />.*Retire legacy cloud output flags/
+Sleep 1200ms
+
+Down
 Sleep 800ms
 Type "h"
 Sleep 500ms
