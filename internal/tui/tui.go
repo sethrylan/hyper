@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -204,7 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		feeds := cloneFeeds(m.feeds)
-		feeds[model.FeedImportantNotifications] = msg.result.Items
+		maps.Copy(feeds, msg.result.Feeds)
 		applyPullRequestMetadata(feeds, msg.result.PullRequests)
 		if err := m.store.Replace(msg.result.Account, m.host, feeds, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()

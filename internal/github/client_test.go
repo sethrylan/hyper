@@ -297,6 +297,13 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 		case "/repos/owner/repo/pulls/1":
 			return jsonValueResponse(restSubjectDetail{HTMLURL: "https://github.com/owner/repo/pull/1", NodeID: "PR_1", UpdatedAt: updated}), nil
 		case "/graphql":
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(body), "HyperSearch") {
+				return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]},"rateLimit":{"remaining":4999}}}`), nil
+			}
 			return jsonResponse(`{"data":{"nodes":[{"__typename":"PullRequest","id":"PR_1","title":"latest title","updatedAt":"2026-08-07T15:04:00Z","isDraft":false,"merged":true,"state":"MERGED"}],"rateLimit":{"remaining":4999}}}`), nil
 		default:
 			t.Fatalf("unexpected request path %q", req.URL.Path)
@@ -313,14 +320,15 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Items) != 3 {
-		t.Fatalf("items = %d, want updated, retained, and new mention", len(result.Items))
+	notifications := result.Feeds[model.FeedImportantNotifications]
+	if len(notifications) != 3 {
+		t.Fatalf("items = %d, want updated, retained, and new mention", len(notifications))
 	}
-	if result.Items[0].Title != "new title" || !containsFoldForTest(result.Items[0].Reviewers, "me") {
-		t.Fatalf("updated item = %#v, want fresh REST fields plus cached reviewer", result.Items[0])
+	if notifications[0].Title != "new title" || !containsFoldForTest(notifications[0].Reviewers, "me") {
+		t.Fatalf("updated item = %#v, want fresh REST fields plus cached reviewer", notifications[0])
 	}
-	if result.Items[1].Key != retained.Key {
-		t.Fatalf("retained item = %#v, want existing item preserved", result.Items[1])
+	if notifications[1].Key != retained.Key {
+		t.Fatalf("retained item = %#v, want existing item preserved", notifications[1])
 	}
 	if len(result.PullRequests) != 1 {
 		t.Fatalf("pull request metadata = %#v, want one update", result.PullRequests)
@@ -574,4 +582,55 @@ func containsFoldForTest(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestRefreshNotificationsDiscoversNewlyAuthoredItems(t *testing.T) {
+	var searchQueries []string
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/notifications":
+			return jsonValueResponse([]restNotification{}), nil
+		case "/graphql":
+			var body struct {
+				Query     string `json:"query"`
+				Variables struct {
+					Query string `json:"query"`
+				} `json:"variables"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(body.Query, "HyperSearch") {
+				return jsonResponse(`{"data":{"nodes":[],"rateLimit":{"remaining":4999}}}`), nil
+			}
+			searchQueries = append(searchQueries, body.Variables.Query)
+			if strings.Contains(body.Variables.Query, "is:pr") {
+				return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"PullRequest","id":"PR_new","title":"just opened","url":"https://github.com/owner/repo/pull/9","state":"OPEN","author":{"login":"me"},"repository":{"name":"repo","owner":{"login":"owner"}}}]},"rateLimit":{"remaining":4998}}}`), nil
+			}
+			return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"Issue","id":"I_new","title":"fresh issue","url":"https://github.com/owner/repo/issues/3","state":"OPEN","author":{"login":"me"},"repository":{"name":"repo","owner":{"login":"owner"}}}]},"rateLimit":{"remaining":4997}}}`), nil
+		default:
+			t.Fatalf("unexpected request path %q", req.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
+		Account: "me",
+		Since:   time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pullRequests := result.Feeds[model.FeedMyPullRequests]
+	if len(pullRequests) != 1 || pullRequests[0].NodeID != "PR_new" || pullRequests[0].Title != "just opened" {
+		t.Fatalf("my pull requests = %#v, want the newly authored pull request", pullRequests)
+	}
+	issues := result.Feeds[model.FeedMyIssues]
+	if len(issues) != 1 || issues[0].NodeID != "I_new" {
+		t.Fatalf("my issues = %#v, want the newly authored issue", issues)
+	}
+	if len(searchQueries) != 2 {
+		t.Fatalf("search queries = %#v, want one pull request and one issue search", searchQueries)
+	}
 }
