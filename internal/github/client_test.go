@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -268,7 +269,7 @@ func TestNotificationPaginationStopsAtCap(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationsIsRESTOnlyAndAdditive(t *testing.T) {
+func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testing.T) {
 	updated := time.Date(2026, 8, 7, 15, 4, 0, 0, time.UTC)
 	existing := model.Item{
 		Host:        "github.com",
@@ -296,8 +297,7 @@ func TestRefreshNotificationsIsRESTOnlyAndAdditive(t *testing.T) {
 		case "/repos/owner/repo/pulls/1":
 			return jsonValueResponse(restSubjectDetail{HTMLURL: "https://github.com/owner/repo/pull/1", NodeID: "PR_1", UpdatedAt: updated}), nil
 		case "/graphql":
-			t.Fatal("short refresh made a GraphQL request")
-			return nil, nil
+			return jsonResponse(`{"data":{"nodes":[{"__typename":"PullRequest","id":"PR_1","title":"latest title","updatedAt":"2026-08-07T15:04:00Z","isDraft":false,"merged":true,"state":"MERGED"}],"rateLimit":{"remaining":4999}}}`), nil
 		default:
 			t.Fatalf("unexpected request path %q", req.URL.Path)
 			return nil, nil
@@ -305,9 +305,10 @@ func TestRefreshNotificationsIsRESTOnlyAndAdditive(t *testing.T) {
 	})}
 
 	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
-		Account:  "me",
-		Existing: []model.Item{existing, retained},
-		Since:    time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
+		Account:            "me",
+		Existing:           []model.Item{existing, retained},
+		PullRequestNodeIDs: []string{"PR_1"},
+		Since:              time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -320,6 +321,42 @@ func TestRefreshNotificationsIsRESTOnlyAndAdditive(t *testing.T) {
 	}
 	if result.Items[1].Key != retained.Key {
 		t.Fatalf("retained item = %#v, want existing item preserved", result.Items[1])
+	}
+	if len(result.PullRequests) != 1 {
+		t.Fatalf("pull request metadata = %#v, want one update", result.PullRequests)
+	}
+	metadata := result.PullRequests[0]
+	if metadata.NodeID != "PR_1" || metadata.Title != "latest title" || metadata.State != "MERGED" || !metadata.Merged {
+		t.Fatalf("pull request metadata = %#v, want latest title and merged state", metadata)
+	}
+}
+
+func TestPullRequestMetadataRefreshDeduplicatesAndBatchesNodeIDs(t *testing.T) {
+	var requests [][]string
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var body struct {
+			Variables struct {
+				IDs []string `json:"ids"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body.Variables.IDs)
+		return jsonResponse(`{"data":{"nodes":[],"rateLimit":{"remaining":4999}}}`), nil
+	})}
+
+	ids := make([]string, 0, 103)
+	for i := range 101 {
+		ids = append(ids, fmt.Sprintf("PR_%d", i))
+	}
+	ids = append(ids, "", "PR_0")
+	if _, _, err := client.fetchPullRequestMetadata(t.Context(), ids); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || len(requests[0]) != 100 || len(requests[1]) != 1 {
+		t.Fatalf("metadata request batches = %#v, want 100 and 1 unique node IDs", requests)
 	}
 }
 

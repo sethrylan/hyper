@@ -60,16 +60,27 @@ type RefreshResult struct {
 }
 
 type NotificationRefreshRequest struct {
-	Account  string
-	Existing []model.Item
-	Since    time.Time
+	Account            string
+	Existing           []model.Item
+	PullRequestNodeIDs []string
+	Since              time.Time
 }
 
 type NotificationRefreshResult struct {
-	Account     string
-	Items       []model.Item
-	RateWarning string
-	RefreshedAt time.Time
+	Account      string
+	Items        []model.Item
+	PullRequests []PullRequestMetadata
+	RateWarning  string
+	RefreshedAt  time.Time
+}
+
+type PullRequestMetadata struct {
+	Draft     bool
+	Merged    bool
+	NodeID    string
+	State     string
+	Title     string
+	UpdatedAt time.Time
 }
 
 type RateLimits struct {
@@ -145,17 +156,23 @@ func (c *Client) RefreshNotifications(ctx context.Context, request NotificationR
 		warning = rateWarning(remaining)
 	}
 
-	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 2)
+	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 3)
 	if err != nil {
 		return NotificationRefreshResult{}, err
 	}
 	warning = joinWarning(warning, notificationWarning)
+	pullRequests, metadataWarning, metadataErr := c.fetchPullRequestMetadata(ctx, request.PullRequestNodeIDs)
+	warning = joinWarning(warning, metadataWarning)
+	if metadataErr != nil {
+		warning = joinWarning(warning, "pull request metadata refresh failed: "+metadataErr.Error())
+	}
 
 	return NotificationRefreshResult{
-		Account:     account,
-		Items:       mergeShortImportantItems(request.Existing, items, account),
-		RateWarning: warning,
-		RefreshedAt: now,
+		Account:      account,
+		Items:        mergeShortImportantItems(request.Existing, items, account),
+		PullRequests: pullRequests,
+		RateWarning:  warning,
+		RefreshedAt:  now,
 	}, nil
 }
 
@@ -460,6 +477,57 @@ func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[s
 		}
 	}
 	return subjects, warning, nil
+}
+
+func (c *Client) fetchPullRequestMetadata(ctx context.Context, nodeIDs []string) ([]PullRequestMetadata, string, error) {
+	ids := uniqueStrings(nodeIDs)
+	metadata := make([]PullRequestMetadata, 0, len(ids))
+	var warning string
+	for start := 0; start < len(ids); start += 100 {
+		end := min(start+100, len(ids))
+		c.setProgress(RefreshProgress{
+			DetailStep:  start/100 + 1,
+			DetailTotal: (len(ids) + 99) / 100,
+			Phase:       "pull request metadata",
+			Step:        3,
+			Total:       3,
+		})
+		var response pullRequestMetadataResponse
+		if err := c.graphQL(ctx, pullRequestMetadataGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
+			return metadata, warning, err
+		}
+		warning = joinWarning(warning, rateWarning(response.Data.RateLimit.Remaining))
+		for _, node := range response.Data.Nodes {
+			if node == nil || node.TypeName != "PullRequest" || node.ID == "" {
+				continue
+			}
+			metadata = append(metadata, PullRequestMetadata{
+				Draft:     node.IsDraft,
+				Merged:    node.Merged,
+				NodeID:    node.ID,
+				State:     node.State,
+				Title:     node.Title,
+				UpdatedAt: node.UpdatedAt,
+			})
+		}
+	}
+	return metadata, warning, nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string, now time.Time) ([]model.Item, string) {
@@ -1049,6 +1117,41 @@ type restSubjectDetail struct {
 	StateReason        string    `json:"state_reason"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	User               user      `json:"user"`
+}
+
+const pullRequestMetadataGraphQL = `
+query HyperPullRequestMetadata($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    __typename
+    ... on PullRequest {
+      id
+      title
+      updatedAt
+      isDraft
+      merged
+      state
+    }
+  }
+  rateLimit { remaining }
+}`
+
+type pullRequestMetadataResponse struct {
+	Data struct {
+		Nodes     []*pullRequestMetadataNode `json:"nodes"`
+		RateLimit struct {
+			Remaining int `json:"remaining"`
+		} `json:"rateLimit"`
+	} `json:"data"`
+}
+
+type pullRequestMetadataNode struct {
+	TypeName  string    `json:"__typename"`
+	ID        string    `json:"id"`
+	IsDraft   bool      `json:"isDraft"`
+	Merged    bool      `json:"merged"`
+	State     string    `json:"state"`
+	Title     string    `json:"title"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 const nodesGraphQL = `

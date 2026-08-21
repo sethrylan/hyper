@@ -48,9 +48,10 @@ func TestNotificationRefreshCommandUsesCachedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	refreshedAt := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
-	item := model.Item{Host: "github.com", Key: "github.com|one", Title: "one"}
+	item := model.Item{Host: "github.com", Key: "github.com|PR_one", NodeID: "PR_one", Title: "one", Type: model.ItemTypePullRequest}
 	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{
 		model.FeedImportantNotifications: {item},
+		model.FeedMyPullRequests:         {item},
 	}, refreshedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestNotificationRefreshCommandUsesCachedState(t *testing.T) {
 	if service.fullCalls != 0 || service.notificationCalls != 1 {
 		t.Fatalf("full/notification calls = %d/%d, want 0/1", service.fullCalls, service.notificationCalls)
 	}
-	if service.request.Account != "me" || !service.request.Since.Equal(refreshedAt) || len(service.request.Existing) != 1 {
+	if service.request.Account != "me" || !service.request.Since.Equal(refreshedAt) || len(service.request.Existing) != 1 || len(service.request.PullRequestNodeIDs) != 1 || service.request.PullRequestNodeIDs[0] != "PR_one" {
 		t.Fatalf("request = %#v, want cached account, timestamp, and item", service.request)
 	}
 }
@@ -77,8 +78,8 @@ func TestNotificationRefreshPreservesOtherFeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldImportant := model.Item{Host: "github.com", Key: "github.com|old", Title: "old"}
-	pullRequest := model.Item{Host: "github.com", Key: "github.com|pr", Title: "pr", Type: model.ItemTypePullRequest}
+	oldImportant := model.Item{Host: "github.com", Key: "github.com|PR_shared", NodeID: "PR_shared", Title: "old", Type: model.ItemTypePullRequest}
+	pullRequest := model.Item{Host: "github.com", Key: oldImportant.Key, NodeID: oldImportant.NodeID, Title: "old", Type: model.ItemTypePullRequest}
 	issue := model.Item{Host: "github.com", Key: "github.com|issue", Title: "issue", Type: model.ItemTypeIssue}
 	feeds := map[model.Feed][]model.Item{
 		model.FeedImportantNotifications: {oldImportant},
@@ -93,8 +94,15 @@ func TestNotificationRefreshPreservesOtherFeeds(t *testing.T) {
 	newImportant := model.Item{Host: "github.com", Key: "github.com|new", Title: "new"}
 
 	updatedModel, _ := m.Update(notificationRefreshMsg{result: github.NotificationRefreshResult{
-		Account:     "me",
-		Items:       []model.Item{oldImportant, newImportant},
+		Account: "me",
+		Items:   []model.Item{oldImportant, newImportant},
+		PullRequests: []github.PullRequestMetadata{{
+			Merged:    true,
+			NodeID:    oldImportant.NodeID,
+			State:     "MERGED",
+			Title:     "new title",
+			UpdatedAt: time.Now(),
+		}},
 		RateWarning: "REST rate limit low",
 		RefreshedAt: time.Now(),
 	}})
@@ -107,6 +115,12 @@ func TestNotificationRefreshPreservesOtherFeeds(t *testing.T) {
 	}
 	if updated.rateWarning != "GraphQL rate limit low; REST rate limit low" {
 		t.Fatalf("rate warning = %q, want prior GraphQL and new REST warnings", updated.rateWarning)
+	}
+	for _, feed := range []model.Feed{model.FeedImportantNotifications, model.FeedMyPullRequests} {
+		item := updated.feeds[feed][0]
+		if item.Title != "new title" || item.State != "MERGED" || !item.Merged {
+			t.Fatalf("%s pull request = %#v, want refreshed title and merged state", feed, item)
+		}
 	}
 }
 

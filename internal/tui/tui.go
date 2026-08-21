@@ -205,6 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		feeds := cloneFeeds(m.feeds)
 		feeds[model.FeedImportantNotifications] = msg.result.Items
+		applyPullRequestMetadata(feeds, msg.result.PullRequests)
 		if err := m.store.Replace(msg.result.Account, m.host, feeds, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
@@ -212,7 +213,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.account = msg.result.Account
 		m.feeds = feedsFromCache(m.store.Data())
 		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
-		m.status = "notifications refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
+		m.status = "quick refresh " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case tickMsg:
 		if m.service == nil {
@@ -485,9 +486,10 @@ func (m Model) refreshCmd() tea.Cmd {
 
 func (m Model) notificationRefreshCmd() tea.Cmd {
 	request := github.NotificationRefreshRequest{
-		Account:  m.account,
-		Existing: append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
-		Since:    m.store.Data().LastRefresh,
+		Account:            m.account,
+		Existing:           append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
+		PullRequestNodeIDs: pullRequestNodeIDs(m.feeds),
+		Since:              m.store.Data().LastRefresh,
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
@@ -858,6 +860,54 @@ func cloneFeeds(feeds map[model.Feed][]model.Item) map[model.Feed][]model.Item {
 		clone[feed] = append([]model.Item(nil), items...)
 	}
 	return clone
+}
+
+func pullRequestNodeIDs(feeds map[model.Feed][]model.Item) []string {
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, feed := range model.Feeds {
+		for _, item := range feeds[feed] {
+			if item.Type != model.ItemTypePullRequest || item.NodeID == "" {
+				continue
+			}
+			if _, ok := seen[item.NodeID]; ok {
+				continue
+			}
+			seen[item.NodeID] = struct{}{}
+			ids = append(ids, item.NodeID)
+		}
+	}
+	return ids
+}
+
+func applyPullRequestMetadata(feeds map[model.Feed][]model.Item, updates []github.PullRequestMetadata) {
+	byNodeID := make(map[string]github.PullRequestMetadata, len(updates))
+	for _, update := range updates {
+		if update.NodeID != "" {
+			byNodeID[update.NodeID] = update
+		}
+	}
+	for feed, items := range feeds {
+		for i, item := range items {
+			update, ok := byNodeID[item.NodeID]
+			if !ok {
+				continue
+			}
+			if update.Title != "" {
+				item.Title = update.Title
+			}
+			if update.State != "" {
+				item.State = update.State
+			}
+			item.Draft = update.Draft
+			item.Merged = update.Merged
+			if !update.UpdatedAt.IsZero() {
+				item.UpdatedAt = update.UpdatedAt
+			}
+			items[i] = item
+		}
+		feeds[feed] = items
+	}
 }
 
 func mergeWarnings(existing, incoming string) string {
