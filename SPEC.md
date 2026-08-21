@@ -95,7 +95,7 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Search results for My Pull Requests and My Issues: 500 each.
 - Poll periodically.
 - Cadence:
-  - Short refresh approximately every 60 seconds. It should use REST notifications updated since the last successful refresh, add or update Important items without removing cached items, and use a lightweight batched GraphQL lookup to refresh the titles, draft state, and merge/closed state of cached pull requests across all feeds.
+  - Short refresh approximately every 60 seconds. It should use REST notifications updated since the last successful refresh, add or update Important items without removing cached items, re-run the `author:@me` searches so pull requests and issues the user just opened appear within a minute, and use a lightweight batched GraphQL lookup to refresh the titles, draft state, and merge/closed state of cached pull requests across all feeds.
   - Full refresh approximately every 5 minutes. It remains authoritative for all feeds and for removing stale Important items.
 - Keep a local cache so the app can render recent results quickly on startup.
 - On rate-limit pressure:

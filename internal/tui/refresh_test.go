@@ -95,7 +95,9 @@ func TestNotificationRefreshPreservesOtherFeeds(t *testing.T) {
 
 	updatedModel, _ := m.Update(notificationRefreshMsg{result: github.NotificationRefreshResult{
 		Account: "me",
-		Items:   []model.Item{oldImportant, newImportant},
+		Feeds: map[model.Feed][]model.Item{
+			model.FeedImportantNotifications: {oldImportant, newImportant},
+		},
 		PullRequests: []github.PullRequestMetadata{{
 			Merged:    true,
 			NodeID:    oldImportant.NodeID,
@@ -124,6 +126,37 @@ func TestNotificationRefreshPreservesOtherFeeds(t *testing.T) {
 	}
 }
 
+func TestNotificationRefreshAddsNewlyAuthoredPullRequest(t *testing.T) {
+	store, err := cache.Open(filepath.Join(t.TempDir(), "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := model.Item{Host: "github.com", Key: "github.com|PR_old", NodeID: "PR_old", Title: "old", Type: model.ItemTypePullRequest}
+	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyPullRequests: {existing},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	m := New(&refreshServiceStub{}, store, "github.com")
+	opened := model.Item{Host: "github.com", Key: "github.com|PR_new", NodeID: "PR_new", Title: "just opened", Type: model.ItemTypePullRequest}
+
+	updatedModel, _ := m.Update(notificationRefreshMsg{result: github.NotificationRefreshResult{
+		Account: "me",
+		Feeds: map[model.Feed][]model.Item{
+			model.FeedMyPullRequests: {existing, opened},
+		},
+		RefreshedAt: time.Now(),
+	}})
+	updated, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want tui.Model", updatedModel)
+	}
+	pullRequests := updated.feeds[model.FeedMyPullRequests]
+	if len(pullRequests) != 2 || pullRequests[1].NodeID != opened.NodeID {
+		t.Fatalf("my pull requests = %#v, want the newly opened pull request appended", pullRequests)
+	}
+}
+
 type refreshServiceStub struct {
 	fullCalls         int
 	notificationCalls int
@@ -148,7 +181,7 @@ func (s *refreshServiceStub) RefreshNotifications(_ context.Context, request git
 	s.request = request
 	return github.NotificationRefreshResult{
 		Account:     request.Account,
-		Items:       request.Existing,
+		Feeds:       map[model.Feed][]model.Item{model.FeedImportantNotifications: request.Existing},
 		RefreshedAt: request.Since.Add(time.Minute),
 	}, nil
 }

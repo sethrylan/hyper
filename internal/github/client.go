@@ -30,8 +30,24 @@ const (
 	notificationReasonMention = "MENTION"
 	phaseIssues               = "issues"
 	phaseNotifications        = "notifications"
+	phasePullRequests         = "pull requests"
 	phaseSupplementalSearches = "supplemental searches"
 )
+
+// quickRefreshSteps counts the progress steps in RefreshNotifications:
+// notification list, notification details, my pull requests, my issues, and
+// pull request metadata.
+const quickRefreshSteps = 5
+
+// authoredFeeds are the feeds built from an author:@me search rather than from
+// the notification list.
+var authoredFeeds = []struct {
+	feed  model.Feed
+	phase string
+}{
+	{feed: model.FeedMyPullRequests, phase: phasePullRequests},
+	{feed: model.FeedMyIssues, phase: phaseIssues},
+}
 
 var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
@@ -68,7 +84,7 @@ type NotificationRefreshRequest struct {
 
 type NotificationRefreshResult struct {
 	Account      string
-	Items        []model.Item
+	Feeds        map[model.Feed][]model.Item
 	PullRequests []PullRequestMetadata
 	RateWarning  string
 	RefreshedAt  time.Time
@@ -156,11 +172,19 @@ func (c *Client) RefreshNotifications(ctx context.Context, request NotificationR
 		warning = rateWarning(remaining)
 	}
 
-	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 3)
+	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, quickRefreshSteps)
 	if err != nil {
 		return NotificationRefreshResult{}, err
 	}
 	warning = joinWarning(warning, notificationWarning)
+
+	feeds, searchWarning, err := c.searchAuthoredFeeds(ctx, now)
+	warning = joinWarning(warning, searchWarning)
+	if err != nil {
+		return NotificationRefreshResult{}, err
+	}
+	feeds[model.FeedImportantNotifications] = mergeShortImportantItems(request.Existing, items, account)
+
 	pullRequests, metadataWarning, metadataErr := c.fetchPullRequestMetadata(ctx, request.PullRequestNodeIDs)
 	warning = joinWarning(warning, metadataWarning)
 	if metadataErr != nil {
@@ -169,11 +193,29 @@ func (c *Client) RefreshNotifications(ctx context.Context, request NotificationR
 
 	return NotificationRefreshResult{
 		Account:      account,
-		Items:        mergeShortImportantItems(request.Existing, items, account),
+		Feeds:        feeds,
 		PullRequests: pullRequests,
 		RateWarning:  warning,
 		RefreshedAt:  now,
 	}, nil
+}
+
+// searchAuthoredFeeds refreshes the feeds that only a search can discover, so
+// pull requests and issues the user just opened appear without waiting for the
+// authoritative refresh.
+func (c *Client) searchAuthoredFeeds(ctx context.Context, now time.Time) (map[model.Feed][]model.Item, string, error) {
+	feeds := make(map[model.Feed][]model.Item, len(authoredFeeds))
+	var warning string
+	for offset, authored := range authoredFeeds {
+		c.setProgress(RefreshProgress{Phase: authored.phase, Step: offset + 3, Total: quickRefreshSteps})
+		items, searchWarning, err := c.search(ctx, authored.feed, now)
+		warning = joinWarning(warning, searchWarning)
+		if err != nil {
+			return nil, warning, err
+		}
+		feeds[authored.feed] = items
+	}
+	return feeds, warning, nil
 }
 
 func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
@@ -211,7 +253,7 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 		}()
 	}
 
-	startFeedRefresh(model.FeedMyPullRequests, RefreshProgress{Phase: "pull requests", Step: 2, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+	startFeedRefresh(model.FeedMyPullRequests, RefreshProgress{Phase: phasePullRequests, Step: 2, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.search(ctx, model.FeedMyPullRequests, now)
 	})
 	startFeedRefresh(model.FeedMyIssues, RefreshProgress{Phase: phaseIssues, Step: 3, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
@@ -489,8 +531,8 @@ func (c *Client) fetchPullRequestMetadata(ctx context.Context, nodeIDs []string)
 			DetailStep:  start/100 + 1,
 			DetailTotal: (len(ids) + 99) / 100,
 			Phase:       "pull request metadata",
-			Step:        3,
-			Total:       3,
+			Step:        quickRefreshSteps,
+			Total:       quickRefreshSteps,
 		})
 		var response pullRequestMetadataResponse
 		if err := c.graphQL(ctx, pullRequestMetadataGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
