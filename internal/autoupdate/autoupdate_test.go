@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/sethrylan/hyper/internal/quota"
 )
 
 type backendStub struct {
@@ -54,6 +57,21 @@ func TestUpdateIgnoresCheckFailure(t *testing.T) {
 	result := service.Update(t.Context())
 	if result.ApplyError != nil || result.UpdatedVersion != "" {
 		t.Fatalf("result = %#v, want empty result", result)
+	}
+}
+
+func TestUpdateReservesWorstCaseCoreUsage(t *testing.T) {
+	budget := quota.NewManager(nil, "github.com", "me")
+	service := &Service{
+		backend:        &backendStub{},
+		budget:         budget,
+		currentVersion: "1.2.2",
+		executablePath: func() (string, error) { return "/tmp/hyper", nil },
+	}
+
+	service.Update(t.Context())
+	if got := budget.Status(time.Now()).Resources[quota.ResourceCore].Used; got != 3 {
+		t.Fatalf("reserved core usage = %d, want 3", got)
 	}
 }
 

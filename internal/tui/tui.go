@@ -4,7 +4,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -21,18 +20,24 @@ import (
 )
 
 const (
-	shortRefresh  = time.Minute
-	fullRefresh   = 5 * time.Minute
-	progressTick  = time.Second
-	updateTimeout = 30 * time.Second
-	unknownValue  = "unknown"
+	pullRequestRefresh  = 5 * time.Second
+	notificationRefresh = 15 * time.Second
+	issueRefresh        = time.Minute
+	metadataRefresh     = time.Minute
+	fullRefresh         = 10 * time.Minute
+	progressTick        = time.Second
+	updateTimeout       = 30 * time.Second
+	unknownValue        = "unknown"
 )
 
 type service interface {
 	CurrentProgress() github.RefreshProgress
 	RateLimits(ctx context.Context) (github.RateLimits, error)
-	Refresh(ctx context.Context) (github.RefreshResult, error)
-	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.NotificationRefreshResult, error)
+	RefreshImportant(ctx context.Context, account string) (github.FeedRefreshResult, error)
+	RefreshIncrementalNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.FeedRefreshResult, error)
+	RefreshIssues(ctx context.Context) (github.FeedRefreshResult, error)
+	RefreshPullRequestMetadata(ctx context.Context, nodeIDs []string) (github.PullRequestMetadataResult, error)
+	RefreshPullRequests(ctx context.Context) (github.FeedRefreshResult, error)
 }
 
 type updateService interface {
@@ -42,8 +47,11 @@ type updateService interface {
 type refreshKind int
 
 const (
-	refreshFull refreshKind = iota
+	refreshPullRequests refreshKind = iota
 	refreshNotifications
+	refreshIssues
+	refreshMetadata
+	refreshImportant
 )
 
 //nolint:containedctx,recvcheck // Bubble Tea models own command lifecycle; value receivers are required by tea.Model usage.
@@ -56,9 +64,9 @@ type Model struct {
 	feeds             map[model.Feed][]model.Item
 	height            int
 	host              string
-	lastFullRefreshAt time.Time
 	loading           bool
 	loadingAt         time.Time
+	loadingRefreshes  map[refreshKind]time.Time
 	rateWarning       string
 	rateLimits        github.RateLimits
 	rateLimitsErr     string
@@ -92,18 +100,20 @@ type row struct {
 	repo string
 }
 
-type refreshMsg struct {
-	result github.RefreshResult
+type feedRefreshMsg struct {
+	kind   refreshKind
+	result github.FeedRefreshResult
 	err    error
 }
 
-type notificationRefreshMsg struct {
-	result github.NotificationRefreshResult
+type metadataRefreshMsg struct {
+	result github.PullRequestMetadataResult
 	err    error
 }
 
 type tickMsg struct {
-	at time.Time
+	at   time.Time
+	kind refreshKind
 }
 
 type progressTickMsg struct{}
@@ -139,20 +149,25 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
 	m := Model{
-		account:           data.Account,
-		cancel:            cancel,
-		ctx:               ctx,
-		expanded:          map[string]bool{},
-		feeds:             feedsFromCache(data),
-		host:              host,
-		lastFullRefreshAt: now,
-		loading:           service != nil,
-		loadingAt:         now,
-		selectedByFeed:    map[model.Feed]int{},
-		service:           service,
-		status:            cacheStatus(data),
-		store:             store,
-		updater:           updater,
+		account:          data.Account,
+		cancel:           cancel,
+		ctx:              ctx,
+		expanded:         map[string]bool{},
+		feeds:            feedsFromCache(data),
+		host:             host,
+		loading:          service != nil,
+		loadingAt:        now,
+		loadingRefreshes: map[refreshKind]time.Time{},
+		selectedByFeed:   map[model.Feed]int{},
+		service:          service,
+		status:           cacheStatus(data),
+		store:            store,
+		updater:          updater,
+	}
+	if service != nil {
+		for _, kind := range initialRefreshes() {
+			m.loadingRefreshes[kind] = now
+		}
 	}
 	for _, feed := range model.Feeds {
 		m.expanded["feed:"+string(feed)] = true
@@ -164,7 +179,13 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tea.RequestWindowSize, tea.RequestBackgroundColor}
 	if m.service != nil {
-		cmds = append(cmds, m.startRefreshCmd(refreshFull), tickCmd())
+		for _, kind := range initialRefreshes() {
+			cmds = append(cmds, m.refreshCmd(kind))
+		}
+		for _, kind := range allRefreshes() {
+			cmds = append(cmds, tickCmd(kind))
+		}
+		cmds = append(cmds, progressTickCmd(), m.rateLimitsCmd())
 	}
 	if m.updater != nil {
 		cmds = append(cmds, m.updateCmd())
@@ -181,54 +202,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleAction(ActionForKey(msg.Keystroke()))
-	case refreshMsg:
-		m.loading = false
-		m.refreshProgress = github.RefreshProgress{}
+	case feedRefreshMsg:
+		m.finishRefresh(msg.kind)
 		if msg.err != nil {
-			m.status = "refresh failed: " + msg.err.Error()
+			m.status = refreshName(msg.kind) + " refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
-		if err := m.store.Replace(msg.result.Account, m.host, msg.result.Feeds, msg.result.RefreshedAt); err != nil {
+		account := m.account
+		if msg.result.Account != "" {
+			account = msg.result.Account
+		}
+		if err := m.store.ReplaceFeed(account, m.host, msg.result.Feed, msg.result.Items, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
 		}
-		m.account = msg.result.Account
+		m.account = account
 		m.feeds = feedsFromCache(m.store.Data())
-		m.rateWarning = msg.result.RateWarning
-		m.status = "refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
+		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
+		m.status = msg.result.Feed.Title() + " refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
-	case notificationRefreshMsg:
-		m.loading = false
-		m.refreshProgress = github.RefreshProgress{}
+	case metadataRefreshMsg:
+		m.finishRefresh(refreshMetadata)
 		if msg.err != nil {
-			m.status = "notification refresh failed: " + msg.err.Error()
+			m.status = "pull request metadata refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
 		feeds := cloneFeeds(m.feeds)
-		maps.Copy(feeds, msg.result.Feeds)
 		applyPullRequestMetadata(feeds, msg.result.PullRequests)
-		if err := m.store.Replace(msg.result.Account, m.host, feeds, msg.result.RefreshedAt); err != nil {
+		if err := m.store.UpdateFeeds(m.account, m.host, feeds); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
 		}
-		m.account = msg.result.Account
 		m.feeds = feedsFromCache(m.store.Data())
 		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
-		m.status = "quick refresh " + msg.result.RefreshedAt.Format(time.Kitchen)
+		m.status = "pull request metadata refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case tickMsg:
 		if m.service == nil {
 			return m, nil
 		}
-		cmds := []tea.Cmd{tickCmd()}
-		if !m.loading {
-			kind := m.automaticRefreshKind(msg.at)
-			if kind == refreshFull {
-				m.lastFullRefreshAt = msg.at
+		cmds := []tea.Cmd{tickCmd(msg.kind)}
+		if !m.refreshLoading(msg.kind) {
+			wasLoading := m.loading
+			m.beginRefresh(msg.kind, msg.at)
+			cmds = append(cmds, m.refreshCmd(msg.kind))
+			if !wasLoading {
+				cmds = append(cmds, progressTickCmd())
 			}
-			m.loading = true
-			m.loadingAt = msg.at
-			cmds = append(cmds, m.startRefreshCmd(kind))
 		}
 		return m, tea.Batch(cmds...)
 	case progressTickMsg:
@@ -291,12 +311,15 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 			m.status = "cache-only mode"
 			return m, nil
 		}
-		if !m.loading {
+		kind := refreshKindForFeed(model.Feeds[m.activeFeed])
+		if !m.refreshLoading(kind) {
 			now := time.Now()
-			m.lastFullRefreshAt = now
-			m.loading = true
-			m.loadingAt = now
-			return m, m.startRefreshCmd(refreshFull)
+			wasLoading := m.loading
+			m.beginRefresh(kind, now)
+			if !wasLoading {
+				return m, tea.Batch(m.refreshCmd(kind), progressTickCmd())
+			}
+			return m, m.refreshCmd(kind)
 		}
 	case ActionRateLimits:
 		if m.service == nil {
@@ -476,27 +499,38 @@ func (m *Model) replaceItem(item model.Item) {
 	}
 }
 
-func (m Model) refreshCmd() tea.Cmd {
+func (m Model) refreshCmd(kind refreshKind) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
 		defer cancel()
-		result, err := m.service.Refresh(ctx)
-		return refreshMsg{result: result, err: err}
-	}
-}
-
-func (m Model) notificationRefreshCmd() tea.Cmd {
-	request := github.NotificationRefreshRequest{
-		Account:            m.account,
-		Existing:           append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
-		PullRequestNodeIDs: pullRequestNodeIDs(m.feeds),
-		Since:              m.store.Data().LastRefresh,
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
-		defer cancel()
-		result, err := m.service.RefreshNotifications(ctx, request)
-		return notificationRefreshMsg{result: result, err: err}
+		switch kind {
+		case refreshPullRequests:
+			result, err := m.service.RefreshPullRequests(ctx)
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		case refreshNotifications:
+			data := m.store.Data()
+			since := data.LastRefreshByFeed[model.FeedImportantNotifications]
+			if since.IsZero() {
+				since = data.LastRefresh
+			}
+			result, err := m.service.RefreshIncrementalNotifications(ctx, github.NotificationRefreshRequest{
+				Account:  m.account,
+				Existing: append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
+				Since:    since,
+			})
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		case refreshIssues:
+			result, err := m.service.RefreshIssues(ctx)
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		case refreshMetadata:
+			result, err := m.service.RefreshPullRequestMetadata(ctx, pullRequestNodeIDs(m.feeds))
+			return metadataRefreshMsg{result: result, err: err}
+		case refreshImportant:
+			result, err := m.service.RefreshImportant(ctx, m.account)
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		default:
+			return feedRefreshMsg{kind: kind, err: fmt.Errorf("unknown refresh kind %d", kind)}
+		}
 	}
 }
 
@@ -517,29 +551,86 @@ func (m Model) updateCmd() tea.Cmd {
 	}
 }
 
-func (m Model) startRefreshCmd(kind refreshKind) tea.Cmd {
-	var refresh tea.Cmd
-	if kind == refreshFull {
-		refresh = m.refreshCmd()
-	} else {
-		refresh = m.notificationRefreshCmd()
-	}
-	return tea.Batch(refresh, progressTickCmd())
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(shortRefresh, func(at time.Time) tea.Msg { return tickMsg{at: at} })
-}
-
-func (m Model) automaticRefreshKind(at time.Time) refreshKind {
-	if at.Sub(m.lastFullRefreshAt) >= fullRefresh {
-		return refreshFull
-	}
-	return refreshNotifications
+func tickCmd(kind refreshKind) tea.Cmd {
+	return tea.Tick(refreshInterval(kind), func(at time.Time) tea.Msg { return tickMsg{at: at, kind: kind} })
 }
 
 func progressTickCmd() tea.Cmd {
 	return tea.Tick(progressTick, func(time.Time) tea.Msg { return progressTickMsg{} })
+}
+
+func initialRefreshes() []refreshKind {
+	return []refreshKind{refreshPullRequests, refreshIssues, refreshMetadata, refreshImportant}
+}
+
+func allRefreshes() []refreshKind {
+	return []refreshKind{refreshPullRequests, refreshNotifications, refreshIssues, refreshMetadata, refreshImportant}
+}
+
+func refreshInterval(kind refreshKind) time.Duration {
+	switch kind {
+	case refreshPullRequests:
+		return pullRequestRefresh
+	case refreshNotifications:
+		return notificationRefresh
+	case refreshIssues:
+		return issueRefresh
+	case refreshMetadata:
+		return metadataRefresh
+	case refreshImportant:
+		return fullRefresh
+	default:
+		return time.Minute
+	}
+}
+
+func refreshKindForFeed(feed model.Feed) refreshKind {
+	switch feed {
+	case model.FeedMyPullRequests:
+		return refreshPullRequests
+	case model.FeedMyIssues:
+		return refreshIssues
+	default:
+		return refreshImportant
+	}
+}
+
+func refreshName(kind refreshKind) string {
+	switch kind {
+	case refreshPullRequests:
+		return "pull request"
+	case refreshNotifications:
+		return "notification"
+	case refreshIssues:
+		return "issue"
+	case refreshMetadata:
+		return "pull request metadata"
+	case refreshImportant:
+		return "Important Notifications"
+	default:
+		return "unknown"
+	}
+}
+
+func (m Model) refreshLoading(kind refreshKind) bool {
+	_, ok := m.loadingRefreshes[kind]
+	return ok
+}
+
+func (m *Model) beginRefresh(kind refreshKind, at time.Time) {
+	if len(m.loadingRefreshes) == 0 {
+		m.loadingAt = at
+	}
+	m.loadingRefreshes[kind] = at
+	m.loading = true
+}
+
+func (m *Model) finishRefresh(kind refreshKind) {
+	delete(m.loadingRefreshes, kind)
+	m.loading = len(m.loadingRefreshes) > 0
+	if !m.loading {
+		m.refreshProgress = github.RefreshProgress{}
+	}
 }
 
 func (m *Model) rebuildRows() {
@@ -653,7 +744,7 @@ func (m Model) renderFooterHelp() string {
 	}
 	parts = append(parts, "y copy", "o/enter open")
 	if m.service != nil {
-		parts = append(parts, "r refresh")
+		parts = append(parts, "r refresh feed")
 	}
 	parts = append(parts, "? help", "q quit")
 	return strings.Join(parts, "  ")
@@ -803,7 +894,7 @@ func (m Model) renderHelp() string {
 		"o/enter       open selected item URL",
 	}
 	if m.service != nil {
-		lines = append(lines, "r             refresh", "shift+r       show rate limits")
+		lines = append(lines, "r             refresh active feed", "shift+r       show rate limits")
 	}
 	lines = append(lines,
 		"tab           next feed",
@@ -828,9 +919,15 @@ func (m Model) renderRateLimits() string {
 		lines = append(lines, "failed to load rate limits: "+m.rateLimitsErr)
 	default:
 		lines = append(lines,
+			"GitHub account",
 			renderRateLimitLine("REST/core", m.rateLimits.Core),
 			renderRateLimitLine("GraphQL", m.rateLimits.GraphQL),
 			renderRateLimitLine("Search", m.rateLimits.Search),
+			"",
+			"Hyper budget (<25%)",
+			renderRateLimitLine("REST/core", m.rateLimits.HyperCore),
+			renderRateLimitLine("GraphQL", m.rateLimits.HyperGraphQL),
+			renderRateLimitLine("Search", m.rateLimits.HyperSearch),
 		)
 	}
 	lines = append(lines, "", "shift+r      close", "q/Ctrl+C     quit")

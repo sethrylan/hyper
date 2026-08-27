@@ -14,6 +14,7 @@ import (
 	"github.com/sethrylan/hyper/internal/cache"
 	"github.com/sethrylan/hyper/internal/demo"
 	"github.com/sethrylan/hyper/internal/github"
+	"github.com/sethrylan/hyper/internal/quota"
 	"github.com/sethrylan/hyper/internal/tui"
 )
 
@@ -64,18 +65,19 @@ func run() error {
 		return fmt.Errorf("open cache: %w", err)
 	}
 
-	client := github.NewClient(ctx.Host, ctx.Token)
-	if updater := releaseUpdater(ctx.Token); updater != nil {
+	budget := quota.NewManager(store, ctx.Host, store.Data().Account)
+	client := github.NewBudgetedClient(ctx.Host, ctx.Token, budget)
+	if updater := releaseUpdater(ctx.Token, budget); updater != nil {
 		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
 	}
 	return runProgram(tui.New(client, store, ctx.Host))
 }
 
-func releaseUpdater(token string) *autoupdate.Service {
+func releaseUpdater(token string, budget *quota.Manager) *autoupdate.Service {
 	if !buildinfo.IsRelease() || os.Getenv("HYPER_NO_UPDATE") == "1" {
 		return nil
 	}
-	updater, err := autoupdate.New(token, buildinfo.Version())
+	updater, err := autoupdate.NewBudgeted(token, buildinfo.Version(), budget)
 	if err != nil {
 		return nil
 	}

@@ -41,12 +41,12 @@ func TestRefreshUsesReconciledDoneCache(t *testing.T) {
 		selectedByFeed: map[model.Feed]int{},
 		store:          store,
 	}
-	updated, _ := m.Update(refreshMsg{
-		result: github.RefreshResult{
-			Account: "me",
-			Feeds: map[model.Feed][]model.Item{
-				model.FeedImportantNotifications: {item},
-			},
+	updated, _ := m.Update(feedRefreshMsg{
+		kind: refreshImportant,
+		result: github.FeedRefreshResult{
+			Account:     "me",
+			Feed:        model.FeedImportantNotifications,
+			Items:       []model.Item{item},
 			RefreshedAt: updatedAt.Add(2 * time.Hour),
 		},
 	})

@@ -95,15 +95,22 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Search results for My Pull Requests and My Issues: 500 each.
 - Poll periodically.
 - Cadence:
-  - Short refresh approximately every 60 seconds. It should use REST notifications updated since the last successful refresh, add or update Important items without removing cached items, re-run the `author:@me` searches so pull requests and issues the user just opened appear within a minute, and use a lightweight batched GraphQL lookup to refresh the titles, draft state, and merge/closed state of cached pull requests across all feeds.
-  - Full refresh approximately every 5 minutes. It remains authoritative for all feeds and for removing stale Important items.
+  - Refresh My Pull Requests approximately every 5 seconds with a lightweight, feed-specific GraphQL search.
+  - Refresh REST notifications incrementally approximately every 15 seconds, adding or updating Important items without removing cached items.
+  - Refresh My Issues and cached pull request metadata approximately every 60 seconds.
+  - Reconcile Important Notifications authoritatively approximately every 10 minutes so stale items are removed.
+- Run feed refreshes independently and apply each successful result immediately. A slow notification refresh must not delay My Pull Requests.
 - Keep a local cache so the app can render recent results quickly on startup.
+- Persist separate successful-refresh timestamps for each feed so a fast pull request refresh cannot advance the incremental notification cursor.
+- Keep Hyper's own API usage strictly below 25% of every GitHub primary rate-limit window. With 5,000-point core and GraphQL limits, Hyper may use at most 1,249 requests or points per window; with a 30-request search limit, it may use at most 7.
+- Persist API usage reservations before sending requests, reconcile GraphQL reservations against `rateLimit.cost`, and retain enough GraphQL capacity for the five-second pull request cadence before admitting lower-priority work.
 - On rate-limit pressure:
   - Show a warning in the status bar.
   - Reduce query depth before failing the whole app.
+  - Defer lower-priority refreshes before slowing My Pull Requests.
   - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
-- Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
+- Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted, and show Hyper's persisted budget usage separately from account-wide usage.
 
 ## Cache and local state
 

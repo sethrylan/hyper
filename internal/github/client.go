@@ -18,6 +18,7 @@ import (
 
 	"github.com/sethrylan/hyper/internal/filter"
 	"github.com/sethrylan/hyper/internal/model"
+	"github.com/sethrylan/hyper/internal/quota"
 )
 
 const (
@@ -26,6 +27,7 @@ const (
 	maxSearchResults     = 2000
 	maxRetries           = 10
 	maxRetryDelay        = 60 * time.Second
+	fastPullRequestPoll  = 5 * time.Second
 
 	notificationReasonMention = "MENTION"
 	phaseIssues               = "issues"
@@ -51,7 +53,10 @@ var authoredFeeds = []struct {
 
 var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
+type pullRequestPriorityKey struct{}
+
 type Client struct {
+	budget     *quota.Manager
 	progress   atomic.Value
 	host       string
 	httpClient *http.Client
@@ -73,6 +78,20 @@ type RefreshResult struct {
 	Feeds       map[model.Feed][]model.Item
 	RateWarning string
 	RefreshedAt time.Time
+}
+
+type FeedRefreshResult struct {
+	Account     string
+	Feed        model.Feed
+	Items       []model.Item
+	RateWarning string
+	RefreshedAt time.Time
+}
+
+type PullRequestMetadataResult struct {
+	PullRequests []PullRequestMetadata
+	RateWarning  string
+	RefreshedAt  time.Time
 }
 
 type NotificationRefreshRequest struct {
@@ -100,9 +119,12 @@ type PullRequestMetadata struct {
 }
 
 type RateLimits struct {
-	Core    RateLimitResource
-	GraphQL RateLimitResource
-	Search  RateLimitResource
+	Core         RateLimitResource
+	GraphQL      RateLimitResource
+	HyperCore    RateLimitResource
+	HyperGraphQL RateLimitResource
+	HyperSearch  RateLimitResource
+	Search       RateLimitResource
 }
 
 type RateLimitResource struct {
@@ -128,6 +150,16 @@ func (r restRateLimitResource) Resource() RateLimitResource {
 	}
 }
 
+func hyperRateLimitResource(window quota.Window) RateLimitResource {
+	limit := quota.BudgetLimit(window.Limit)
+	return RateLimitResource{
+		Limit:     limit,
+		Remaining: max(0, limit-window.Used),
+		ResetAt:   window.ResetAt,
+		Used:      window.Used,
+	}
+}
+
 func NewClient(host, token string) *Client {
 	return &Client{
 		host:       host,
@@ -135,6 +167,12 @@ func NewClient(host, token string) *Client {
 		retrySleep: sleepContext,
 		token:      token,
 	}
+}
+
+func NewBudgetedClient(host, token string, budget *quota.Manager) *Client {
+	client := NewClient(host, token)
+	client.budget = budget
+	return client
 }
 
 func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
@@ -148,12 +186,119 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 	if _, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/rate_limit", c.host), nil, &restResponse); err != nil {
 		return RateLimits{}, fmt.Errorf("fetch REST rate limits: %w", err)
 	}
+	if c.budget != nil {
+		now := time.Now()
+		for resource, limit := range map[quota.Resource]restRateLimitResource{
+			quota.ResourceCore:    restResponse.Resources.Core,
+			quota.ResourceGraphQL: restResponse.Resources.GraphQL,
+			quota.ResourceSearch:  restResponse.Resources.Search,
+		} {
+			if err := c.budget.Configure(resource, limit.Limit, time.Unix(limit.Reset, 0), now); err != nil {
+				return RateLimits{}, fmt.Errorf("configure Hyper API budget: %w", err)
+			}
+		}
+	}
 
-	return RateLimits{
+	limits := RateLimits{
 		Core:    restResponse.Resources.Core.Resource(),
 		GraphQL: restResponse.Resources.GraphQL.Resource(),
 		Search:  restResponse.Resources.Search.Resource(),
+	}
+	if c.budget != nil {
+		state := c.budget.Status(time.Now())
+		limits.HyperCore = hyperRateLimitResource(state.Resources[quota.ResourceCore])
+		limits.HyperGraphQL = hyperRateLimitResource(state.Resources[quota.ResourceGraphQL])
+		limits.HyperSearch = hyperRateLimitResource(state.Resources[quota.ResourceSearch])
+	}
+	return limits, nil
+}
+
+func (c *Client) RefreshPullRequests(ctx context.Context) (FeedRefreshResult, error) {
+	return c.refreshAuthoredFeed(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests)
+}
+
+func (c *Client) RefreshIssues(ctx context.Context) (FeedRefreshResult, error) {
+	return c.refreshAuthoredFeed(ctx, model.FeedMyIssues)
+}
+
+func (c *Client) refreshAuthoredFeed(ctx context.Context, feed model.Feed) (FeedRefreshResult, error) {
+	now := time.Now()
+	items, warning, err := c.search(ctx, feed, now)
+	if err != nil {
+		return FeedRefreshResult{}, err
+	}
+	return FeedRefreshResult{Feed: feed, Items: items, RateWarning: warning, RefreshedAt: now}, nil
+}
+
+func (c *Client) RefreshIncrementalNotifications(ctx context.Context, request NotificationRefreshRequest) (FeedRefreshResult, error) {
+	now := time.Now()
+	account, warning, err := c.resolveAccount(ctx, request.Account)
+	if err != nil {
+		return FeedRefreshResult{}, err
+	}
+	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 2)
+	if err != nil {
+		return FeedRefreshResult{}, err
+	}
+	return FeedRefreshResult{
+		Account:     account,
+		Feed:        model.FeedImportantNotifications,
+		Items:       mergeShortImportantItems(request.Existing, items, account),
+		RateWarning: joinWarning(warning, notificationWarning),
+		RefreshedAt: now,
 	}, nil
+}
+
+func (c *Client) RefreshImportant(ctx context.Context, _ string) (FeedRefreshResult, error) {
+	now := time.Now()
+	verifiedAccount, warning, err := c.resolveAccount(ctx, "")
+	if err != nil {
+		return FeedRefreshResult{}, err
+	}
+	items, refreshWarning, err := c.fetchNotifications(ctx, verifiedAccount)
+	if err != nil {
+		return FeedRefreshResult{}, err
+	}
+	return FeedRefreshResult{
+		Account:     verifiedAccount,
+		Feed:        model.FeedImportantNotifications,
+		Items:       items,
+		RateWarning: joinWarning(warning, refreshWarning),
+		RefreshedAt: now,
+	}, nil
+}
+
+func (c *Client) RefreshPullRequestMetadata(ctx context.Context, nodeIDs []string) (PullRequestMetadataResult, error) {
+	now := time.Now()
+	pullRequests, warning, err := c.fetchPullRequestMetadata(ctx, nodeIDs)
+	if err != nil {
+		return PullRequestMetadataResult{PullRequests: pullRequests, RateWarning: warning, RefreshedAt: now}, err
+	}
+	return PullRequestMetadataResult{PullRequests: pullRequests, RateWarning: warning, RefreshedAt: now}, nil
+}
+
+func (c *Client) resolveAccount(ctx context.Context, account string) (string, string, error) {
+	if account != "" {
+		if c.budget != nil {
+			if err := c.budget.SetIdentity(c.host, account); err != nil {
+				return "", "", fmt.Errorf("persist API budget identity: %w", err)
+			}
+		}
+		return account, "", nil
+	}
+	var response struct {
+		Login string `json:"login"`
+	}
+	remaining, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
+	if err != nil {
+		return "", "", fmt.Errorf("fetch authenticated user: %w", err)
+	}
+	if c.budget != nil {
+		if err := c.budget.SetIdentity(c.host, response.Login); err != nil {
+			return "", "", fmt.Errorf("persist API budget identity: %w", err)
+		}
+	}
+	return response.Login, rateWarning(remaining), nil
 }
 
 func (c *Client) RefreshNotifications(ctx context.Context, request NotificationRefreshRequest) (NotificationRefreshResult, error) {
@@ -339,7 +484,7 @@ func (c *Client) viewer(ctx context.Context) (string, string, error) {
 			} `json:"viewer"`
 		} `json:"data"`
 	}
-	if err := c.graphQL(ctx, `query { viewer { login } rateLimit { remaining } }`, nil, &response); err != nil {
+	if err := c.graphQL(ctx, `query HyperViewer { viewer { login } rateLimit { cost limit remaining resetAt } }`, nil, &response); err != nil {
 		return "", "", fmt.Errorf("fetch authenticated user: %w", err)
 	}
 	return response.Data.Viewer.Login, rateWarning(response.Data.RateLimit.Remaining), nil
@@ -788,7 +933,7 @@ func (c *Client) search(ctx context.Context, feed model.Feed, now time.Time) ([]
 	if err != nil {
 		return nil, "", err
 	}
-	items, warning, err := c.searchQuery(ctx, query, maxSearchResults)
+	items, warning, err := c.searchQueryWithDocument(ctx, query, maxSearchResults, authoredSearchGraphQL)
 	if err != nil {
 		return nil, warning, fmt.Errorf("search %s: %w", feed.Title(), err)
 	}
@@ -799,13 +944,17 @@ func (c *Client) search(ctx context.Context, feed model.Feed, now time.Time) ([]
 }
 
 func (c *Client) searchQuery(ctx context.Context, query string, limit int) ([]model.Item, string, error) {
+	return c.searchQueryWithDocument(ctx, query, limit, searchGraphQL)
+}
+
+func (c *Client) searchQueryWithDocument(ctx context.Context, query string, limit int, document string) ([]model.Item, string, error) {
 	var items []model.Item
 	var after *string
 	var warning string
 	for len(items) < limit {
 		var response searchResponse
 		variables := map[string]any{"query": query, "first": min(100, limit-len(items)), "after": after}
-		if err := c.graphQL(ctx, searchGraphQL, variables, &response); err != nil {
+		if err := c.graphQL(ctx, document, variables, &response); err != nil {
 			return nil, warning, err
 		}
 		warning = joinWarning(warning, rateWarning(response.Data.RateLimit.Remaining))
@@ -932,6 +1081,10 @@ func (c *Client) doWithHeaders(ctx context.Context, method, endpoint, contentTyp
 }
 
 func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType string, bodyBytes []byte) ([]byte, http.Header, error) {
+	reservation, err := c.reserveRequest(ctx, endpoint, bodyBytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	var body io.Reader
 	if bodyBytes != nil {
 		body = bytes.NewReader(bodyBytes)
@@ -965,7 +1118,66 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType strin
 			code:     resp.StatusCode,
 		}
 	}
+	if c.budget != nil && reservation.Cost > 0 && reservation.Resource == quota.ResourceGraphQL {
+		var metering struct {
+			Data struct {
+				RateLimit struct {
+					Cost int `json:"cost"`
+				} `json:"rateLimit"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(raw, &metering) == nil && metering.Data.RateLimit.Cost > 0 {
+			if err := c.budget.Reconcile(reservation, metering.Data.RateLimit.Cost); err != nil {
+				return nil, resp.Header, fmt.Errorf("reconcile Hyper API usage: %w", err)
+			}
+		}
+	}
 	return raw, resp.Header, nil
+}
+
+func (c *Client) reserveRequest(ctx context.Context, endpoint string, body []byte) (quota.Reservation, error) {
+	if c.budget == nil || strings.HasSuffix(endpoint, "/rate_limit") {
+		return quota.Reservation{}, nil
+	}
+	resource := quota.ResourceCore
+	cost := 1
+	if strings.HasSuffix(endpoint, "/graphql") {
+		resource = quota.ResourceGraphQL
+		cost = graphQLReservationCost(body)
+	}
+	now := time.Now()
+	minimumRemaining := 0
+	if resource == quota.ResourceGraphQL && ctx.Value(pullRequestPriorityKey{}) != true {
+		state := c.budget.Status(now)
+		resetAt := state.Resources[quota.ResourceGraphQL].ResetAt
+		if resetAt.IsZero() {
+			resetAt = now.Add(time.Hour)
+		}
+		if remaining := resetAt.Sub(now); remaining > 0 {
+			minimumRemaining = int((remaining + fastPullRequestPoll - 1) / fastPullRequestPoll)
+		}
+	}
+	reservation, err := c.budget.ReserveKeeping(resource, cost, minimumRemaining, now)
+	if err != nil {
+		return quota.Reservation{}, err
+	}
+	return reservation, nil
+}
+
+func graphQLReservationCost(body []byte) int {
+	query := string(body)
+	switch {
+	case strings.Contains(query, "HyperAuthoredSearch"):
+		return 2
+	case strings.Contains(query, "HyperSearch"):
+		return 5
+	case strings.Contains(query, "HyperNodes"):
+		return 3
+	case strings.Contains(query, "HyperPullRequestMetadata"), strings.Contains(query, "HyperViewer"):
+		return 2
+	default:
+		return 5
+	}
 }
 
 type statusError struct {
@@ -1174,7 +1386,7 @@ query HyperPullRequestMetadata($ids: [ID!]!) {
       state
     }
   }
-  rateLimit { remaining }
+  rateLimit { cost limit remaining resetAt }
 }`
 
 type pullRequestMetadataResponse struct {
@@ -1245,7 +1457,7 @@ query HyperNodes($ids: [ID!]!) {
       repository { name owner { login } }
     }
   }
-  rateLimit { remaining }
+  rateLimit { cost limit remaining resetAt }
 }`
 
 type nodesResponse struct {
@@ -1333,6 +1545,41 @@ func reviewAuthorLogins(reviews []review) []string {
 	return values
 }
 
+const authoredSearchGraphQL = `
+query HyperAuthoredSearch($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on Issue {
+        __typename
+        id
+        title
+        url
+        createdAt
+        state
+        stateReason
+        updatedAt
+        author { login }
+        repository { name owner { login } }
+      }
+      ... on PullRequest {
+        __typename
+        id
+        title
+        url
+        createdAt
+        isDraft
+        merged
+        state
+        updatedAt
+        author { login }
+        repository { name owner { login } }
+      }
+    }
+  }
+  rateLimit { cost limit remaining resetAt }
+}`
+
 const searchGraphQL = `
 query HyperSearch($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
@@ -1377,7 +1624,7 @@ query HyperSearch($query: String!, $first: Int!, $after: String) {
       }
     }
   }
-  rateLimit { remaining }
+  rateLimit { cost limit remaining resetAt }
 }`
 
 type searchResponse struct {

@@ -14,7 +14,16 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/model"
+	"github.com/sethrylan/hyper/internal/quota"
 )
+
+type quotaStoreStub struct{ state quota.State }
+
+func (s *quotaStoreStub) QuotaState() quota.State { return s.state }
+func (s *quotaStoreStub) SaveQuotaState(state quota.State) error {
+	s.state = state
+	return nil
+}
 
 func TestRateLimitsUsesRESTOnly(t *testing.T) {
 	var calls int
@@ -36,6 +45,76 @@ func TestRateLimitsUsesRESTOnly(t *testing.T) {
 	}
 	if limits.GraphQL.Limit != 5000 || limits.GraphQL.Used != 5000 || limits.GraphQL.Remaining != 0 || !limits.GraphQL.ResetAt.Equal(time.Unix(200, 0)) {
 		t.Fatalf("GraphQL limits = %#v, want exhausted REST resource", limits.GraphQL)
+	}
+}
+
+func TestRateLimitsIncludesHyperBudget(t *testing.T) {
+	now := time.Now()
+	store := &quotaStoreStub{}
+	budget := quota.NewManager(store, "github.com", "me")
+	client := NewBudgetedClient("github.com", "token", budget)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(fmt.Sprintf(`{"resources":{"core":{"limit":5000,"used":10,"remaining":4990,"reset":%d},"graphql":{"limit":5000,"used":20,"remaining":4980,"reset":%d},"search":{"limit":30,"used":0,"remaining":30,"reset":%d}}}`, now.Add(time.Hour).Unix(), now.Add(time.Hour).Unix(), now.Add(time.Minute).Unix())), nil
+	})}
+
+	limits, err := client.RateLimits(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.HyperCore.Limit != 1249 || limits.HyperGraphQL.Limit != 1249 || limits.HyperSearch.Limit != 7 {
+		t.Fatalf("Hyper limits = %#v/%#v/%#v, want 1249/1249/7", limits.HyperCore, limits.HyperGraphQL, limits.HyperSearch)
+	}
+}
+
+func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
+	store := &quotaStoreStub{}
+	budget := quota.NewManager(store, "github.com", "me")
+	client := NewBudgetedClient("github.com", "token", budget)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "HyperAuthoredSearch") || strings.Contains(string(body), "latestReviews") || strings.Contains(string(body), "assignees") {
+			t.Fatalf("authored query is not lightweight: %s", body)
+		}
+		return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]},"rateLimit":{"cost":1,"remaining":4999}}}`), nil
+	})}
+
+	result, err := client.RefreshPullRequests(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Feed != model.FeedMyPullRequests {
+		t.Fatalf("feed = %s, want My Pull Requests", result.Feed)
+	}
+	if got := budget.Status(time.Now()).Resources[quota.ResourceGraphQL].Used; got != 1 {
+		t.Fatalf("recorded GraphQL usage = %d, want actual cost 1", got)
+	}
+}
+
+func TestBudgetExhaustionStopsRequestBeforeDispatch(t *testing.T) {
+	now := time.Now()
+	store := &quotaStoreStub{}
+	budget := quota.NewManager(store, "github.com", "me")
+	if err := budget.Configure(quota.ResourceGraphQL, 20, now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.Reserve(quota.ResourceGraphQL, 4, now); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	client := NewBudgetedClient("github.com", "token", budget)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return emptySearchResponse(), nil
+	})}
+
+	if _, err := client.RefreshPullRequests(t.Context()); err == nil {
+		t.Fatal("expected Hyper budget exhaustion")
+	}
+	if calls != 0 {
+		t.Fatalf("HTTP calls = %d, want none after budget rejection", calls)
 	}
 }
 
@@ -301,7 +380,7 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(body), "HyperSearch") {
+			if strings.Contains(string(body), "HyperAuthoredSearch") {
 				return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]},"rateLimit":{"remaining":4999}}}`), nil
 			}
 			return jsonResponse(`{"data":{"nodes":[{"__typename":"PullRequest","id":"PR_1","title":"latest title","updatedAt":"2026-08-07T15:04:00Z","isDraft":false,"merged":true,"state":"MERGED"}],"rateLimit":{"remaining":4999}}}`), nil
@@ -439,7 +518,7 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 		}
 
 		switch {
-		case req.URL.Path == "/graphql" && strings.Contains(body, "query { viewer"):
+		case req.URL.Path == "/graphql" && strings.Contains(body, "HyperViewer"):
 			return jsonResponse(`{"data":{"viewer":{"login":"me"},"rateLimit":{"remaining":500}}}`), nil
 		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:pr"):
 			started <- "pull requests"
@@ -601,7 +680,7 @@ func TestRefreshNotificationsDiscoversNewlyAuthoredItems(t *testing.T) {
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(body.Query, "HyperSearch") {
+			if !strings.Contains(body.Query, "HyperAuthoredSearch") {
 				return jsonResponse(`{"data":{"nodes":[],"rateLimit":{"remaining":4999}}}`), nil
 			}
 			searchQueries = append(searchQueries, body.Variables.Query)

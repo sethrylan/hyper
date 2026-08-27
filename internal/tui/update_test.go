@@ -36,8 +36,8 @@ func TestInitStartsBackgroundUpdate(t *testing.T) {
 	if !ok {
 		t.Fatalf("Init message type = %T, want tea.BatchMsg", m.Init()())
 	}
-	if len(batch) != 5 {
-		t.Fatalf("Init command count = %d, want window, color, refresh, timer, and update", len(batch))
+	if len(batch) != 14 {
+		t.Fatalf("Init command count = %d, want refresh scheduling plus update", len(batch))
 	}
 }
 
@@ -53,9 +53,10 @@ func TestSuccessfulUpdateNoticePersistsAfterRefresh(t *testing.T) {
 	if !ok {
 		t.Fatalf("updated model type = %T, want tui.Model", updatedModel)
 	}
-	refreshedModel, _ := updated.Update(refreshMsg{result: github.RefreshResult{
+	refreshedModel, _ := updated.Update(feedRefreshMsg{kind: refreshPullRequests, result: github.FeedRefreshResult{
 		Account:     "me",
-		Feeds:       mapFeeds(),
+		Feed:        model.FeedMyPullRequests,
+		Items:       mapFeeds()[model.FeedMyPullRequests],
 		RefreshedAt: time.Now(),
 	}})
 	refreshed, ok := refreshedModel.(Model)

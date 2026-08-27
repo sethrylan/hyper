@@ -44,6 +44,9 @@ func TestCacheJSON(t *testing.T) {
 		if got := len(data.FeedItemIDs[feed]); got != want {
 			t.Fatalf("%s count = %d, want %d", feed, got, want)
 		}
+		if got := data.LastRefreshByFeed[feed]; !got.Equal(wantRefreshedAt) {
+			t.Fatalf("%s migrated refresh time = %s, want %s", feed, got, wantRefreshedAt)
+		}
 	}
 
 	const closedPRKey = "github.com|PR_demo_k6_legacy_flags"

@@ -50,6 +50,6 @@ hyper
 | `o` / `enter` | Open in browser |
 | `y` | Copy URL |
 | `E` | Mark done (Important Notifications) |
-| `r` | Refresh |
+| `r` | Refresh active feed |
 | `?` | Help |
 | `q` | Quit |

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/model"
+	"github.com/sethrylan/hyper/internal/quota"
 )
 
 func TestReconcileDone(t *testing.T) {
@@ -63,6 +64,86 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if len(data.FeedItemIDs[model.FeedMyIssues]) != 1 {
 		t.Fatalf("feed item count = %d, want 1", len(data.FeedItemIDs[model.FeedMyIssues]))
+	}
+}
+
+func TestReplaceFeedPreservesOtherFeedsAndIndependentTimestamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
+	second := first.Add(5 * time.Second)
+	pr := model.Item{Host: "github.com", Key: "pr", Title: "pr", Type: model.ItemTypePullRequest}
+	issue := model.Item{Host: "github.com", Key: "issue", Title: "issue", Type: model.ItemTypeIssue}
+	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyPullRequests: {pr},
+		model.FeedMyIssues:       {issue},
+	}, first); err != nil {
+		t.Fatal(err)
+	}
+	pr.Title = "new"
+	if err := store.ReplaceFeed("me", "github.com", model.FeedMyPullRequests, []model.Item{pr}, second); err != nil {
+		t.Fatal(err)
+	}
+	data := store.Data()
+	if len(data.FeedItemIDs[model.FeedMyIssues]) != 1 || data.Items["issue"].Title != "issue" {
+		t.Fatalf("issue feed changed: %#v", data)
+	}
+	if !data.LastRefreshByFeed[model.FeedMyPullRequests].Equal(second) || !data.LastRefreshByFeed[model.FeedMyIssues].Equal(first) {
+		t.Fatalf("feed timestamps = %#v, want independent times", data.LastRefreshByFeed)
+	}
+}
+
+func TestFeedReplacementPreservesQuotaState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := quota.State{Host: "github.com", Account: "me", Resources: map[quota.Resource]quota.Window{
+		quota.ResourceGraphQL: {Limit: 5000, Used: 42, ResetAt: time.Now().Add(time.Hour)},
+	}}
+	if saveErr := store.SaveQuotaState(state); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	if replaceErr := store.ReplaceFeed("me", "github.com", model.FeedMyPullRequests, nil, time.Now()); replaceErr != nil {
+		t.Fatal(replaceErr)
+	}
+	loaded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.QuotaState().Resources[quota.ResourceGraphQL].Used; got != 42 {
+		t.Fatalf("persisted GraphQL usage = %d, want 42", got)
+	}
+}
+
+func TestLeanFeedRefreshPreservesSharedNotificationMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
+	rich := model.Item{
+		Host: "github.com", Key: "shared", NodeID: "PR_one", Title: "old", Type: model.ItemTypePullRequest,
+		NotificationThreadID: "thread", Reviewers: []string{"me"}, UpdatedAt: updatedAt,
+	}
+	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {rich},
+		model.FeedMyPullRequests:         {rich},
+	}, updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	lean := model.Item{Host: "github.com", Key: "shared", NodeID: "PR_one", Title: "new", Type: model.ItemTypePullRequest, UpdatedAt: updatedAt.Add(time.Minute)}
+	if err := store.ReplaceFeed("me", "github.com", model.FeedMyPullRequests, []model.Item{lean}, updatedAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	item := store.Data().Items[lean.Key]
+	if item.Title != "new" || item.NotificationThreadID != "thread" || len(item.Reviewers) != 1 {
+		t.Fatalf("merged item = %#v, want fresh fields and rich notification metadata", item)
 	}
 }
 
