@@ -33,11 +33,12 @@ func TestInitStartsTwoRefreshLanesAndOneHeartbeat(t *testing.T) {
 func TestSelectedCadenceFitsGraphQLBudget(t *testing.T) {
 	const (
 		fastPullRequestCost = 1
+		fullPullRequestCost = 20
 		issueCost           = 1
 		importantCost       = 34
 	)
 	used := int(time.Hour/pullRequestRefresh)*fastPullRequestCost +
-		int(time.Hour/fullRefresh)*(issueCost+importantCost)
+		int(time.Hour/fullRefresh)*(fullPullRequestCost+issueCost+importantCost)
 	if used >= 1250 {
 		t.Fatalf("modeled hourly GraphQL usage = %d, want below 1250", used)
 	}
@@ -70,7 +71,7 @@ func TestNotificationRefreshCommandUsesImportantCursor(t *testing.T) {
 	}
 }
 
-func TestFeedRefreshUpdatesOnlyCompletedFeed(t *testing.T) {
+func TestPullRequestRefreshMergesNewestPageIntoCachedFeed(t *testing.T) {
 	store, err := cache.Open(filepath.Join(t.TempDir(), "cache.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -78,22 +79,23 @@ func TestFeedRefreshUpdatesOnlyCompletedFeed(t *testing.T) {
 	refreshedAt := time.Now()
 	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
 		model.FeedImportantNotifications: {{Key: "important"}},
-		model.FeedMyPullRequests:         {{Key: "old"}},
+		model.FeedMyPullRequests:         {{Key: "old"}, {Key: "updated", Title: "stale"}},
 		model.FeedMyIssues:               {{Key: "issue"}},
 	}, refreshedAt); err != nil {
 		t.Fatal(err)
 	}
 	m := New(&refreshServiceStub{}, store, "github.com")
 	newPR := model.Item{Key: "new", Type: model.ItemTypePullRequest}
+	updatedPR := model.Item{Key: "updated", Title: "fresh", Type: model.ItemTypePullRequest}
 
 	updatedModel, _ := m.Update(feedRefreshMsg{kind: refreshPullRequests, result: github.FeedRefreshResult{
-		Feed: model.FeedMyPullRequests, Items: []model.Item{newPR}, RefreshedAt: refreshedAt.Add(time.Second),
+		Feed: model.FeedMyPullRequests, Items: []model.Item{updatedPR, newPR}, RefreshedAt: refreshedAt.Add(time.Second),
 	}})
 	updated, ok := updatedModel.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)
 	}
-	if got := updated.feeds[model.FeedMyPullRequests]; len(got) != 1 || got[0].Key != newPR.Key {
+	if got := updated.feeds[model.FeedMyPullRequests]; len(got) != 3 || got[0].Key != "old" || got[1].Title != "fresh" || got[2].Key != newPR.Key {
 		t.Fatalf("pull requests = %#v", got)
 	}
 	if len(updated.feeds[model.FeedImportantNotifications]) != 1 || len(updated.feeds[model.FeedMyIssues]) != 1 {
@@ -128,6 +130,71 @@ func TestBackgroundRefreshDoesNotReplacePullRequests(t *testing.T) {
 	}
 	if got := updated.feeds[model.FeedMyPullRequests]; len(got) != 1 || got[0].Key != "fresh-pr" {
 		t.Fatalf("background refresh replaced pull requests: %#v", got)
+	}
+}
+
+func TestAuthoritativeBackgroundRefreshReconcilesPullRequests(t *testing.T) {
+	store, err := cache.Open(filepath.Join(t.TempDir(), "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshedAt := time.Now()
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyPullRequests: {{Key: "closed-since-last-full-refresh"}},
+	}, refreshedAt); err != nil {
+		t.Fatal(err)
+	}
+	m := New(&refreshServiceStub{}, store, "github.com")
+
+	updatedModel, _ := m.Update(backgroundRefreshMsg{result: github.RefreshResult{
+		Account: "me",
+		Feeds: map[model.Feed][]model.Item{
+			model.FeedImportantNotifications: nil,
+			model.FeedMyPullRequests:         {{Key: "still-open"}},
+			model.FeedMyIssues:               nil,
+		},
+		RefreshedAt: refreshedAt.Add(time.Minute),
+	}})
+	updated, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	if got := updated.feeds[model.FeedMyPullRequests]; len(got) != 1 || got[0].Key != "still-open" {
+		t.Fatalf("pull requests = %#v, want authoritative replacement", got)
+	}
+}
+
+func TestRefreshWarningsAreReplacedPerLaneAndCleared(t *testing.T) {
+	m := newRefreshTestModel(t)
+	now := time.Now()
+
+	updatedModel, _ := m.Update(feedRefreshMsg{kind: refreshPullRequests, result: github.FeedRefreshResult{
+		Feed: model.FeedMyPullRequests, RateWarning: "GraphQL remaining: 99", RefreshedAt: now,
+	}})
+	updated, ok := updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	updatedModel, _ = updated.Update(backgroundRefreshMsg{result: github.RefreshResult{
+		Account: "me", Feeds: emptyFeeds(), RateWarning: "REST remaining: 10", RefreshedAt: now,
+	}})
+	updated, ok = updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	if got := updated.rateWarning(); got != "GraphQL remaining: 99; REST remaining: 10" {
+		t.Fatalf("warnings = %q, want one warning per lane", got)
+	}
+
+	updatedModel, _ = updated.Update(feedRefreshMsg{kind: refreshPullRequests, result: github.FeedRefreshResult{
+		Feed: model.FeedMyPullRequests, RefreshedAt: now.Add(time.Second),
+	}})
+	updated, ok = updatedModel.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updatedModel)
+	}
+	if got := updated.rateWarning(); got != "REST remaining: 10" {
+		t.Fatalf("warnings after healthy PR refresh = %q, want background warning only", got)
 	}
 }
 
@@ -273,10 +340,10 @@ func (s *refreshServiceStub) RateLimits(context.Context) (github.RateLimits, err
 	return github.RateLimits{}, nil
 }
 
-func (s *refreshServiceStub) RefreshBackground(_ context.Context, account string) (github.RefreshResult, error) {
+func (s *refreshServiceStub) RefreshBackground(context.Context) (github.RefreshResult, error) {
 	s.backgroundCalls++
 	return github.RefreshResult{
-		Account: account,
+		Account: "me",
 		Feeds: map[model.Feed][]model.Item{
 			model.FeedImportantNotifications: nil,
 			model.FeedMyIssues:               nil,

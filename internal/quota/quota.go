@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/jsonfile"
+	"golang.org/x/sys/unix"
 )
 
 const budgetDivisor = 4
@@ -59,9 +60,10 @@ func (e ExhaustedError) Error() string {
 }
 
 type Manager struct {
-	mu    sync.Mutex
-	path  string
-	state State
+	lockFile *os.File
+	mu       sync.Mutex
+	path     string
+	state    State
 }
 
 func NewManager(host, account string) *Manager {
@@ -77,11 +79,18 @@ func OpenDefault(host, account string) (*Manager, error) {
 }
 
 func Open(path, host, account string) (*Manager, error) {
+	lockFile, err := lockLedger(path)
+	if err != nil {
+		return nil, err
+	}
 	var state State
 	if _, err := jsonfile.Read(path, &state); err != nil {
+		_ = unlockLedger(lockFile)
 		return nil, fmt.Errorf("read API usage: %w", err)
 	}
-	return newManager(path, state, host, account), nil
+	manager := newManager(path, state, host, account)
+	manager.lockFile = lockFile
+	return manager, nil
 }
 
 func newManager(path string, state State, host, account string) *Manager {
@@ -171,18 +180,33 @@ func (m *Manager) Reconcile(reservation Reservation, actual int) error {
 	if reservation.Cost <= 0 || actual <= 0 || actual == reservation.Cost {
 		return nil
 	}
+	if actual > reservation.Cost {
+		return fmt.Errorf("actual API cost %d exceeds reserved upper bound %d", actual, reservation.Cost)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	window := m.state.Resources[reservation.Resource]
 	if !window.ResetAt.Equal(reservation.windowReset) {
 		return nil
 	}
-	window.Used += actual - reservation.Cost
+	window.Used -= reservation.Cost - actual
 	if window.Used < 0 {
 		window.Used = 0
 	}
 	m.state.Resources[reservation.Resource] = window
 	return m.saveLocked()
+}
+
+// Close releases this process's exclusive ownership of the usage ledger.
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lockFile == nil {
+		return nil
+	}
+	err := unlockLedger(m.lockFile)
+	m.lockFile = nil
+	return err
 }
 
 func (m *Manager) Status(now time.Time) State {
@@ -217,6 +241,36 @@ func (m *Manager) saveLocked() error {
 	}
 	if err := jsonfile.Write(m.path, m.state); err != nil {
 		return fmt.Errorf("save API usage: %w", err)
+	}
+	return nil
+}
+
+func lockLedger(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create API usage directory: %w", err)
+	}
+	//nolint:gosec // The ledger path belongs to the application and is not executable.
+	file, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open API usage lock: %w", err)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, errors.New("another Hyper process is already using the API usage ledger")
+		}
+		return nil, fmt.Errorf("lock API usage ledger: %w", err)
+	}
+	return file, nil
+}
+
+func unlockLedger(file *os.File) error {
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_UN); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("unlock API usage ledger: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close API usage lock: %w", err)
 	}
 	return nil
 }

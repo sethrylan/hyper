@@ -69,6 +69,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open API usage ledger: %w", err)
 	}
+	defer func() { _ = budget.Close() }()
 	client := github.NewBudgetedClient(ctx.Host, ctx.Token, budget)
 	if updater := releaseUpdater(ctx.Token, budget); updater != nil {
 		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))

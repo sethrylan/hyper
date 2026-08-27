@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +32,7 @@ const (
 
 type service interface {
 	RateLimits(ctx context.Context) (github.RateLimits, error)
-	RefreshBackground(ctx context.Context, account string) (github.RefreshResult, error)
+	RefreshBackground(ctx context.Context) (github.RefreshResult, error)
 	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.FeedRefreshResult, error)
 	RefreshPullRequests(ctx context.Context) (github.FeedRefreshResult, error)
 }
@@ -65,7 +66,8 @@ type Model struct {
 	nextPullRequests    time.Time
 	pullRequestsLoading bool
 	pullRequestsStart   time.Time
-	rateWarning         string
+	pullRequestWarning  string
+	backgroundWarning   string
 	rateLimits          github.RateLimits
 	rateLimitsErr       string
 	rateLimitsLoading   bool
@@ -207,15 +209,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.result.Account != "" {
 			account = msg.result.Account
 		}
+		items := msg.result.Items
+		if msg.kind == refreshPullRequests {
+			items = mergeFeedChanges(m.feeds[msg.result.Feed], items)
+		}
 		if err := m.store.ReplaceFeeds(account, m.host, map[model.Feed][]model.Item{
-			msg.result.Feed: msg.result.Items,
+			msg.result.Feed: items,
 		}, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
 		}
 		m.account = account
 		m.feeds = feedsFromCache(m.store.Data())
-		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
+		if msg.kind == refreshPullRequests {
+			m.pullRequestWarning = msg.result.RateWarning
+		} else {
+			m.backgroundWarning = msg.result.RateWarning
+		}
 		m.status = msg.result.Feed.Title() + " refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case backgroundRefreshMsg:
@@ -234,7 +244,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.account = account
 		m.feeds = feedsFromCache(m.store.Data())
-		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
+		m.backgroundWarning = msg.result.RateWarning
 		m.status = "background refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case tickMsg:
@@ -541,11 +551,10 @@ func (m Model) refreshCmd(kind refreshKind) tea.Cmd {
 			return feedRefreshMsg{kind: kind, result: result, err: err}
 		}
 	case refreshBackground:
-		account := m.account
 		return func() tea.Msg {
 			ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
 			defer cancel()
-			result, err := m.service.RefreshBackground(ctx, account)
+			result, err := m.service.RefreshBackground(ctx)
 			return backgroundRefreshMsg{result: result, err: err}
 		}
 	default:
@@ -874,8 +883,8 @@ func (m Model) renderStatus() string {
 	if m.refreshing() {
 		status = fmt.Sprintf("%s refreshing from GitHub (%s)", spinnerFrame(m.spinner), formatDuration(time.Since(m.refreshStartedAt())))
 	}
-	if m.rateWarning != "" {
-		status = status + " | " + m.rateWarning
+	if warning := m.rateWarning(); warning != "" {
+		status = status + " | " + warning
 	}
 	if m.updateNotice != "" {
 		status = status + " | " + m.updateNotice
@@ -925,11 +934,6 @@ func (m Model) renderRateLimits() string {
 			renderRateLimitLine("REST/core", m.rateLimits.Core),
 			renderRateLimitLine("GraphQL", m.rateLimits.GraphQL),
 			renderRateLimitLine("Search", m.rateLimits.Search),
-			"",
-			"Hyper budget (<25%)",
-			renderRateLimitLine("REST/core", m.rateLimits.HyperCore),
-			renderRateLimitLine("GraphQL", m.rateLimits.HyperGraphQL),
-			renderRateLimitLine("Search", m.rateLimits.HyperSearch),
 		)
 	}
 	lines = append(lines, "", "shift+r      close", "q/Ctrl+C     quit")
@@ -954,15 +958,14 @@ func renderRateLimitLine(label string, resource github.RateLimitResource) string
 	return fmt.Sprintf("%-10s %5d/%-5d remaining, %5d used, resets %s", label, resource.Remaining, resource.Limit, resource.Used, reset)
 }
 
-func mergeWarnings(existing, incoming string) string {
-	switch {
-	case existing == "":
-		return incoming
-	case incoming == "", strings.Contains(existing, incoming):
-		return existing
-	default:
-		return existing + "; " + incoming
+func (m Model) rateWarning() string {
+	warnings := make([]string, 0, 2)
+	for _, warning := range []string{m.pullRequestWarning, m.backgroundWarning} {
+		if warning != "" && !slices.Contains(warnings, warning) {
+			warnings = append(warnings, warning)
+		}
 	}
+	return strings.Join(warnings, "; ")
 }
 
 func feedsFromCache(data cache.Data) map[model.Feed][]model.Item {
@@ -971,6 +974,23 @@ func feedsFromCache(data cache.Data) map[model.Feed][]model.Item {
 		feeds[feed] = append([]model.Item(nil), data.Feeds[feed].Items...)
 	}
 	return feeds
+}
+
+func mergeFeedChanges(existing, changed []model.Item) []model.Item {
+	items := append([]model.Item(nil), existing...)
+	index := make(map[string]int, len(items))
+	for i, item := range items {
+		index[item.Key] = i
+	}
+	for _, item := range changed {
+		if i, ok := index[item.Key]; ok {
+			items[i] = item
+			continue
+		}
+		index[item.Key] = len(items)
+		items = append(items, item)
+	}
+	return items
 }
 
 func spinnerFrame(frame int) string {

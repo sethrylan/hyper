@@ -105,16 +105,16 @@ func TestRenderRateLimits(t *testing.T) {
 				ResetAt:   time.Date(2026, 5, 14, 10, 8, 0, 0, time.UTC),
 				Used:      0,
 			},
-			HyperCore:    github.RateLimitResource{Limit: 1249, Remaining: 1200, Used: 49},
-			HyperGraphQL: github.RateLimitResource{Limit: 1249, Remaining: 1000, Used: 249},
-			HyperSearch:  github.RateLimitResource{Limit: 7, Remaining: 7},
 		},
 	}
 	view := m.renderRateLimits()
-	for _, want := range []string{"GitHub rate limits", "account: sethrylan", "GitHub account", "Hyper budget (<25%)", "1249", "shift+r      close"} {
+	for _, want := range []string{"GitHub rate limits", "account: sethrylan", "GitHub account", "15000", "shift+r      close"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("renderRateLimits() = %q, want %q", view, want)
 		}
+	}
+	if strings.Contains(view, "Hyper budget") {
+		t.Fatalf("renderRateLimits() = %q, want no Hyper budget section", view)
 	}
 }
 

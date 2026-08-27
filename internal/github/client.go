@@ -65,12 +65,9 @@ type NotificationRefreshRequest struct {
 }
 
 type RateLimits struct {
-	Core         RateLimitResource
-	GraphQL      RateLimitResource
-	HyperCore    RateLimitResource
-	HyperGraphQL RateLimitResource
-	HyperSearch  RateLimitResource
-	Search       RateLimitResource
+	Core    RateLimitResource
+	GraphQL RateLimitResource
+	Search  RateLimitResource
 }
 
 type RateLimitResource struct {
@@ -93,16 +90,6 @@ func (r restRateLimitResource) Resource() RateLimitResource {
 		Remaining: r.Remaining,
 		ResetAt:   time.Unix(r.Reset, 0),
 		Used:      r.Used,
-	}
-}
-
-func hyperRateLimitResource(window quota.Window) RateLimitResource {
-	limit := quota.BudgetLimit(window.Limit)
-	return RateLimitResource{
-		Limit:     limit,
-		Remaining: max(0, limit-window.Used),
-		ResetAt:   window.ResetAt,
-		Used:      window.Used,
 	}
 }
 
@@ -150,18 +137,12 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 		GraphQL: restResponse.Resources.GraphQL.Resource(),
 		Search:  restResponse.Resources.Search.Resource(),
 	}
-	if c.budget != nil {
-		state := c.budget.Status(time.Now())
-		limits.HyperCore = hyperRateLimitResource(state.Resources[quota.ResourceCore])
-		limits.HyperGraphQL = hyperRateLimitResource(state.Resources[quota.ResourceGraphQL])
-		limits.HyperSearch = hyperRateLimitResource(state.Resources[quota.ResourceSearch])
-	}
 	return limits, nil
 }
 
 func (c *Client) RefreshPullRequests(ctx context.Context) (FeedRefreshResult, error) {
 	now := time.Now()
-	items, warning, err := c.search(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests, now)
+	items, warning, err := c.searchFirstPage(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests, now)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
@@ -211,9 +192,9 @@ func (c *Client) resolveAccount(ctx context.Context, account string) (string, st
 	return response.Login, rateWarning(remaining), nil
 }
 
-func (c *Client) RefreshBackground(ctx context.Context, account string) (RefreshResult, error) {
+func (c *Client) RefreshBackground(ctx context.Context) (RefreshResult, error) {
 	now := time.Now()
-	verifiedAccount, rateWarning, err := c.resolveAccount(ctx, account)
+	verifiedAccount, rateWarning, err := c.resolveAccount(ctx, "")
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -228,7 +209,7 @@ func (c *Client) RefreshBackground(ctx context.Context, account string) (Refresh
 		warning string
 	}
 
-	results := make(chan feedRefreshResult, 2)
+	results := make(chan feedRefreshResult, 3)
 	startFeedRefresh := func(feed model.Feed, refresh func(context.Context) ([]model.Item, string, error)) {
 		go func() {
 			items, warning, err := refresh(refreshCtx)
@@ -247,13 +228,16 @@ func (c *Client) RefreshBackground(ctx context.Context, account string) (Refresh
 	startFeedRefresh(model.FeedMyIssues, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.search(ctx, model.FeedMyIssues, now)
 	})
+	startFeedRefresh(model.FeedMyPullRequests, func(ctx context.Context) ([]model.Item, string, error) {
+		return c.search(ctx, model.FeedMyPullRequests, now)
+	})
 	startFeedRefresh(model.FeedImportantNotifications, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.fetchNotifications(ctx, verifiedAccount)
 	})
 
 	feeds := map[model.Feed][]model.Item{}
 	var firstErr error
-	for range 2 {
+	for range 3 {
 		result := <-results
 		if result.err != nil {
 			if firstErr == nil || errors.Is(firstErr, context.Canceled) {
@@ -672,6 +656,27 @@ func (c *Client) search(ctx context.Context, feed model.Feed, now time.Time) ([]
 	return items, warning, nil
 }
 
+func (c *Client) searchFirstPage(ctx context.Context, feed model.Feed, now time.Time) ([]model.Item, string, error) {
+	query, err := filter.Query(feed, now)
+	if err != nil {
+		return nil, "", err
+	}
+	query += " sort:updated-desc"
+	var response searchResponse
+	variables := map[string]any{"query": query, "first": 100, "after": nil}
+	if err := c.graphQL(ctx, authoredSearchGraphQL, variables, &response); err != nil {
+		return nil, "", fmt.Errorf("search %s: %w", feed.Title(), err)
+	}
+	items := make([]model.Item, 0, len(response.Data.Search.Nodes))
+	for _, node := range response.Data.Search.Nodes {
+		item := node.Item(c.host)
+		if item.Key != "" {
+			items = append(items, item.WithFeed(feed))
+		}
+	}
+	return items, rateWarning(response.Data.RateLimit.Remaining), nil
+}
+
 func (c *Client) searchQuery(ctx context.Context, query string, limit int) ([]model.Item, string, error) {
 	return c.searchQueryWithDocument(ctx, query, limit, searchGraphQL)
 }
@@ -872,7 +877,11 @@ func (c *Client) reserveRequest(ctx context.Context, endpoint string, body []byt
 	cost := 1
 	if strings.HasSuffix(endpoint, "/graphql") {
 		resource = quota.ResourceGraphQL
-		cost = graphQLReservationCost(body)
+		var err error
+		cost, err = graphQLReservationCost(body)
+		if err != nil {
+			return quota.Reservation{}, err
+		}
 	}
 	now := time.Now()
 	minimumRemaining := 0
@@ -893,17 +902,21 @@ func (c *Client) reserveRequest(ctx context.Context, endpoint string, body []byt
 	return reservation, nil
 }
 
-func graphQLReservationCost(body []byte) int {
+func graphQLReservationCost(body []byte) (int, error) {
 	query := string(body)
 	switch {
 	case strings.Contains(query, "HyperAuthoredSearch"):
-		return 2
+		// One search connection requesting at most 100 nodes costs at most one point.
+		return 1, nil
 	case strings.Contains(query, "HyperSearch"):
-		return 5
+		// One search connection plus at most three nested connections for each
+		// of 100 results costs three points; keep two points of safety margin.
+		return 5, nil
 	case strings.Contains(query, "HyperNodes"):
-		return 3
+		// At most three nested connections for each of 100 nodes costs three points.
+		return 3, nil
 	default:
-		return 5
+		return 0, errors.New("GraphQL document has no API cost upper bound")
 	}
 }
 

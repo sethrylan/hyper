@@ -40,7 +40,7 @@ func TestRateLimitsUsesRESTOnly(t *testing.T) {
 	}
 }
 
-func TestRateLimitsIncludesHyperBudget(t *testing.T) {
+func TestRateLimitsConfigureEnforcementBudget(t *testing.T) {
 	now := time.Now()
 	budget := quota.NewManager("github.com", "me")
 	client := NewBudgetedClient("github.com", "token", budget)
@@ -48,12 +48,13 @@ func TestRateLimitsIncludesHyperBudget(t *testing.T) {
 		return jsonResponse(fmt.Sprintf(`{"resources":{"core":{"limit":5000,"used":10,"remaining":4990,"reset":%d},"graphql":{"limit":5000,"used":20,"remaining":4980,"reset":%d},"search":{"limit":30,"used":0,"remaining":30,"reset":%d}}}`, now.Add(time.Hour).Unix(), now.Add(time.Hour).Unix(), now.Add(time.Minute).Unix())), nil
 	})}
 
-	limits, err := client.RateLimits(t.Context())
+	_, err := client.RateLimits(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limits.HyperCore.Limit != 1249 || limits.HyperGraphQL.Limit != 1249 || limits.HyperSearch.Limit != 7 {
-		t.Fatalf("Hyper limits = %#v/%#v/%#v, want 1249/1249/7", limits.HyperCore, limits.HyperGraphQL, limits.HyperSearch)
+	state := budget.Status(now)
+	if state.Resources[quota.ResourceCore].Limit != 5000 || state.Resources[quota.ResourceGraphQL].Limit != 5000 || state.Resources[quota.ResourceSearch].Limit != 30 {
+		t.Fatalf("configured limits = %#v, want GitHub limits copied into enforcement budget", state.Resources)
 	}
 }
 
@@ -80,6 +81,57 @@ func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
 	}
 	if got := budget.Status(time.Now()).Resources[quota.ResourceGraphQL].Used; got != 1 {
 		t.Fatalf("recorded GraphQL usage = %d, want actual cost 1", got)
+	}
+}
+
+func TestPullRequestRefreshFetchesOnlyNewestPage(t *testing.T) {
+	var calls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "sort:updated-desc") {
+			t.Fatalf("query = %s, want newest-first sort", body)
+		}
+		return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":true,"endCursor":"next"},"nodes":[{"__typename":"PullRequest","id":"PR_1","title":"one","url":"https://github.com/o/r/pull/1","repository":{"name":"r","owner":{"login":"o"}}}]},"rateLimit":{"cost":1,"remaining":4999}}}`), nil
+	})}
+
+	result, err := client.RefreshPullRequests(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("GraphQL calls = %d, want exactly one even when another page exists", calls)
+	}
+	if len(result.Items) != 1 || result.Items[0].Key == "" {
+		t.Fatalf("items = %#v, want the first-page pull request", result.Items)
+	}
+}
+
+func TestGraphQLReservationCostsAreUpperBounds(t *testing.T) {
+	tests := map[string]int{
+		authoredSearchGraphQL: 1,
+		searchGraphQL:         5,
+		nodesGraphQL:          3,
+	}
+	for document, want := range tests {
+		body, err := json.Marshal(map[string]any{"query": document})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := graphQLReservationCost(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("reservation cost = %d, want %d", got, want)
+		}
+	}
+	if _, err := graphQLReservationCost([]byte(`{"query":"query Unknown { viewer { login } }"}`)); err == nil {
+		t.Fatal("expected unnamed GraphQL document to fail closed")
 	}
 }
 
@@ -461,6 +513,8 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 		}
 
 		switch {
+		case req.URL.Path == "/user":
+			return jsonResponse(`{"login":"me"}`), nil
 		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:issue"):
 			started <- "issues"
 			<-release
@@ -478,7 +532,7 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.RefreshBackground(t.Context(), "me")
+		_, err := client.RefreshBackground(t.Context())
 		done <- err
 	}()
 
@@ -513,6 +567,36 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 		if !seen[feed] {
 			t.Fatalf("feed %q was not refreshed in parallel; started feeds = %#v", feed, seen)
 		}
+	}
+}
+
+func TestBackgroundRefreshAlwaysResolvesAuthenticatedAccount(t *testing.T) {
+	var userCalls int
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/user":
+			userCalls++
+			return jsonResponse(`{"login":"new-account"}`), nil
+		case "/notifications":
+			return jsonResponse(`[]`), nil
+		case "/graphql":
+			return emptySearchResponse(), nil
+		default:
+			t.Fatalf("unexpected request path %q", req.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	result, err := client.RefreshBackground(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userCalls != 1 || result.Account != "new-account" {
+		t.Fatalf("account/user calls = %q/%d, want new-account/1", result.Account, userCalls)
+	}
+	if len(result.Feeds) != 3 {
+		t.Fatalf("authoritative feeds = %#v, want all three feeds", result.Feeds)
 	}
 }
 

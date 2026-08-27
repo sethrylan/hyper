@@ -74,6 +74,9 @@ func (s *Store) Data() Data {
 // ReplaceFeeds replaces only the supplied feeds and advances their cursors.
 func (s *Store) ReplaceFeeds(account, host string, feeds map[model.Feed][]model.Item, refreshedAt time.Time) error {
 	ensureMaps(&s.data)
+	if s.data.Account != account || s.data.Host != host {
+		s.data.Feeds = map[model.Feed]FeedData{}
+	}
 	s.data.Account = account
 	s.data.Host = host
 	for feed, items := range feeds {

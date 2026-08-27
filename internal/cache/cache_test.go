@@ -87,6 +87,29 @@ func TestReplaceFeedsPreservesUnspecifiedFeedsAndIndependentCopies(t *testing.T)
 	}
 }
 
+func TestReplaceFeedsClearsFeedsWhenIdentityChanges(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFeeds("old-account", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {{Key: "private-notification"}},
+		model.FeedMyPullRequests:         {{Key: "private-pr"}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFeeds("new-account", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyIssues: {{Key: "new-issue"}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	data := store.Data()
+	if len(data.Feeds) != 1 || len(data.Feeds[model.FeedMyIssues].Items) != 1 {
+		t.Fatalf("feeds after account change = %#v, want only new account's issue feed", data.Feeds)
+	}
+}
+
 func TestLegacyCacheDropsFeedsButPreservesDoneState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.json")
 	legacy := `{"account":"me","items":{"item":{"key":"item"}},"feed_item_ids":{"important_notifications":["item"]},"done":{"item":{"done_at":"2026-08-27T14:00:00Z","updated_at":"2026-08-27T13:00:00Z"}}}`

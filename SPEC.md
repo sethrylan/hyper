@@ -95,13 +95,14 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Search results for My Pull Requests and My Issues: 500 each.
 - Poll periodically.
 - Cadence:
-  - Refresh My Pull Requests approximately every 5 seconds with a lightweight, feed-specific GraphQL search.
+  - Refresh the newest page of My Pull Requests approximately every 5 seconds with one lightweight GraphQL request, merging those changes into the cached feed.
   - Refresh REST notifications incrementally approximately every 15 seconds, adding or updating Important items without removing cached items.
-  - Refresh My Issues and reconcile Important Notifications authoritatively approximately every 10 minutes. This refresh also updates rich Important-item metadata and removes stale items.
-- Run two independent refresh lanes and apply each successful result immediately. A slow background refresh must not delay My Pull Requests, and background results must not replace the pull request feed.
+  - Reconcile all three feeds authoritatively approximately every 10 minutes. This refresh also updates rich Important-item metadata and removes stale items.
+- Run two independent refresh lanes and apply each successful result immediately. A slow background refresh must not delay My Pull Requests; the ten-minute authoritative refresh replaces all three feeds so stale pull requests are eventually removed.
 - Keep a local cache so the app can render recent results quickly on startup.
 - Store each feed and its successful-refresh timestamp independently so a fast pull request refresh cannot advance the incremental notification cursor or overwrite richer Important-item data.
 - Keep Hyper's own API usage strictly below 25% of every GitHub primary rate-limit window. With 5,000-point core and GraphQL limits, Hyper may use at most 1,249 requests or points per window; with a 30-request search limit, it may use at most 7.
+- Allow only one running Hyper process to own the shared API usage ledger at a time.
 - Persist API usage reservations before sending requests, reconcile GraphQL reservations against `rateLimit.cost`, and retain enough GraphQL capacity for the five-second pull request cadence before admitting lower-priority work.
 - On rate-limit pressure:
   - Show a warning in the status bar.
