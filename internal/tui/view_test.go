@@ -108,10 +108,13 @@ func TestRenderRateLimits(t *testing.T) {
 		},
 	}
 	view := m.renderRateLimits()
-	for _, want := range []string{"GitHub rate limits", "account: sethrylan", "REST/core", "GraphQL", "Search", "shift+r      close"} {
+	for _, want := range []string{"GitHub rate limits", "account: sethrylan", "GitHub account", "15000", "shift+r      close"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("renderRateLimits() = %q, want %q", view, want)
 		}
+	}
+	if strings.Contains(view, "Hyper budget") {
+		t.Fatalf("renderRateLimits() = %q, want no Hyper budget section", view)
 	}
 }
 

@@ -2,6 +2,7 @@
 package cache
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,11 +20,8 @@ func TestReconcileDone(t *testing.T) {
 	}
 
 	got := ReconcileDone([]model.Item{unchanged, updated}, done)
-	if len(got) != 1 {
-		t.Fatalf("reconciled item count = %d, want 1", len(got))
-	}
-	if got[0].Key != "updated" || got[0].Done {
-		t.Fatal("updated item should be re-added as not done")
+	if len(got) != 1 || got[0].Key != "updated" || got[0].Done {
+		t.Fatalf("reconciled items = %#v, want only updated item as not done", got)
 	}
 	if _, ok := done["updated"]; ok {
 		t.Fatal("stale done state should be cleared")
@@ -32,161 +30,162 @@ func TestReconcileDone(t *testing.T) {
 
 func TestStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.json")
-	store, err := Open(path)
-	if err != nil {
+	store, openErr := Open(path)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	refreshedAt := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
+	item := model.Item{Host: "github.com", Key: "issue", Title: "issue", Type: model.ItemTypeIssue}
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyIssues: {item},
+	}, refreshedAt); err != nil {
 		t.Fatal(err)
 	}
-	item := model.Item{
-		Host:            "github.com",
-		Key:             "github.com|I_1",
-		NodeID:          "I_1",
-		RepositoryName:  "repo",
-		RepositoryOwner: "owner",
-		Title:           "issue",
-		Type:            model.ItemTypeIssue,
-		UpdatedAt:       time.Now().UTC(),
-		URL:             "https://github.com/owner/repo/issues/1",
-	}
-	if replaceErr := store.Replace("me", "github.com", map[model.Feed][]model.Item{model.FeedMyIssues: {item}}, time.Now().UTC()); replaceErr != nil {
-		t.Fatal(replaceErr)
-	}
+
 	loaded, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data := loaded.Data()
-	if data.Account != "me" {
-		t.Fatalf("account = %q, want me", data.Account)
+	if data.Version != schemaVersion || data.Account != "me" || data.Host != "github.com" {
+		t.Fatalf("cache identity = %#v", data)
 	}
-	if _, ok := data.Items[item.Key]; !ok {
-		t.Fatalf("item %q missing after round trip", item.Key)
+	feed := data.Feeds[model.FeedMyIssues]
+	if len(feed.Items) != 1 || feed.Items[0].Key != item.Key || !feed.RefreshedAt.Equal(refreshedAt) {
+		t.Fatalf("issue feed = %#v", feed)
 	}
-	if len(data.FeedItemIDs[model.FeedMyIssues]) != 1 {
-		t.Fatalf("feed item count = %d, want 1", len(data.FeedItemIDs[model.FeedMyIssues]))
+}
+
+func TestReplaceFeedsPreservesUnspecifiedFeedsAndIndependentCopies(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
+	second := first.Add(5 * time.Second)
+	important := model.Item{Key: "shared", Title: "rich", NotificationThreadID: "thread"}
+	pullRequest := model.Item{Key: "shared", Title: "old", Type: model.ItemTypePullRequest}
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {important},
+		model.FeedMyPullRequests:         {pullRequest},
+	}, first); err != nil {
+		t.Fatal(err)
+	}
+	pullRequest.Title = "new"
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyPullRequests: {pullRequest},
+	}, second); err != nil {
+		t.Fatal(err)
+	}
+
+	data := store.Data()
+	if got := data.Feeds[model.FeedImportantNotifications]; got.Items[0].Title != "rich" || !got.RefreshedAt.Equal(first) {
+		t.Fatalf("important feed changed: %#v", got)
+	}
+	if got := data.Feeds[model.FeedMyPullRequests]; got.Items[0].Title != "new" || !got.RefreshedAt.Equal(second) {
+		t.Fatalf("pull request feed = %#v", got)
+	}
+}
+
+func TestReplaceFeedsClearsFeedsWhenIdentityChanges(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFeeds("old-account", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {{Key: "private-notification"}},
+		model.FeedMyPullRequests:         {{Key: "private-pr"}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFeeds("new-account", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyIssues: {{Key: "new-issue"}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	data := store.Data()
+	if len(data.Feeds) != 1 || len(data.Feeds[model.FeedMyIssues].Items) != 1 {
+		t.Fatalf("feeds after account change = %#v, want only new account's issue feed", data.Feeds)
+	}
+}
+
+func TestLegacyCacheDropsFeedsButPreservesDoneState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	legacy := `{"account":"me","items":{"item":{"key":"item"}},"feed_item_ids":{"important_notifications":["item"]},"done":{"item":{"done_at":"2026-08-27T14:00:00Z","updated_at":"2026-08-27T13:00:00Z"}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := store.Data()
+	if len(data.Feeds) != 0 || data.Account != "" {
+		t.Fatalf("legacy feed data was not reset: %#v", data)
+	}
+	if _, ok := data.Done["item"]; !ok {
+		t.Fatal("legacy Done marker was not preserved")
 	}
 }
 
 func TestOpenDefaultUsesHyperDirectoryInHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-
 	store, err := OpenDefault()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".hyper", "cache.json")
-	if store.path != want {
+	if want := filepath.Join(home, ".hyper", "cache.json"); store.path != want {
 		t.Fatalf("default cache path = %q, want %q", store.path, want)
 	}
 }
 
-func TestMarkDoneAllowsNonNotificationItems(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.json")
-	store, err := Open(path)
+func TestDoneStateOnlyChangesImportantFeed(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cache.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := model.Item{
-		Host:            "github.com",
-		Key:             "github.com|I_2",
-		NodeID:          "I_2",
-		RepositoryName:  "repo",
-		RepositoryOwner: "owner",
-		Title:           "supplemental issue",
-		Type:            model.ItemTypeIssue,
-		UpdatedAt:       time.Date(2026, 5, 13, 13, 0, 0, 0, time.UTC),
-		URL:             "https://github.com/owner/repo/issues/2",
+	item := model.Item{Key: "shared", Title: "item", UpdatedAt: time.Now()}
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {item},
+		model.FeedMyPullRequests:         {item},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	doneAt := time.Date(2026, 5, 13, 14, 0, 0, 0, time.UTC)
+	doneAt := item.UpdatedAt.Add(time.Hour)
 	if err := store.MarkDone(item, doneAt); err != nil {
 		t.Fatal(err)
 	}
 	data := store.Data()
-	if _, ok := data.Done[item.Key]; !ok {
-		t.Fatal("non-notification item was not recorded as done")
+	if !data.Feeds[model.FeedImportantNotifications].Items[0].Done {
+		t.Fatal("important item was not marked done")
 	}
-	if !data.Items[item.Key].Done {
-		t.Fatal("non-notification item was not marked done in cache")
+	if data.Feeds[model.FeedMyPullRequests].Items[0].Done {
+		t.Fatal("pull request copy should not inherit local Done state")
+	}
+	if err := store.MarkUndone(data.Feeds[model.FeedImportantNotifications].Items[0]); err != nil {
+		t.Fatal(err)
+	}
+	data = store.Data()
+	if data.Feeds[model.FeedImportantNotifications].Items[0].Done {
+		t.Fatal("important item is still marked done")
 	}
 }
 
-func TestMarkUndoneClearsDoneState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.json")
-	store, err := Open(path)
+func TestReplaceFeedsClearsDoneFieldsOutsideImportant(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cache.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := model.Item{
-		Host:            "github.com",
-		Key:             "github.com|I_3",
-		NodeID:          "I_3",
-		RepositoryName:  "repo",
-		RepositoryOwner: "owner",
-		Title:           "done issue",
-		Type:            model.ItemTypeIssue,
-		UpdatedAt:       time.Date(2026, 5, 13, 13, 0, 0, 0, time.UTC),
-		URL:             "https://github.com/owner/repo/issues/3",
-	}
-	if err := store.MarkDone(item, item.UpdatedAt.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	item.Done = true
-	item.DoneAt = item.UpdatedAt.Add(time.Hour)
-	if err := store.MarkUndone(item); err != nil {
-		t.Fatal(err)
-	}
-
-	data := store.Data()
-	if _, ok := data.Done[item.Key]; ok {
-		t.Fatal("done state was not cleared")
-	}
-	if data.Items[item.Key].Done {
-		t.Fatal("cached item is still marked done")
-	}
-	if !data.Items[item.Key].DoneAt.IsZero() {
-		t.Fatal("cached item still has DoneAt")
-	}
-}
-
-func TestReplaceDoesNotFilterDoneOutsideImportantNotifications(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.json")
-	store, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := model.Item{
-		Done:            true,
-		DoneAt:          time.Date(2026, 5, 13, 14, 0, 0, 0, time.UTC),
-		Host:            "github.com",
-		Key:             "github.com|PR_1",
-		NodeID:          "PR_1",
-		RepositoryName:  "repo",
-		RepositoryOwner: "owner",
-		Title:           "open pull request",
-		Type:            model.ItemTypePullRequest,
-		UpdatedAt:       time.Date(2026, 5, 13, 13, 0, 0, 0, time.UTC),
-		URL:             "https://github.com/owner/repo/pull/1",
-	}
-	if err := store.MarkDone(item, item.DoneAt); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Replace("me", "github.com", map[model.Feed][]model.Item{
+	item := model.Item{Key: "pr", Done: true, DoneAt: time.Now(), Type: model.ItemTypePullRequest}
+	if err := store.ReplaceFeeds("me", "github.com", map[model.Feed][]model.Item{
 		model.FeedMyPullRequests: {item},
-	}, time.Now().UTC()); err != nil {
+	}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-
-	data := store.Data()
-	if len(data.FeedItemIDs[model.FeedMyPullRequests]) != 1 {
-		t.Fatalf("my pull request count = %d, want 1", len(data.FeedItemIDs[model.FeedMyPullRequests]))
-	}
-	if data.Items[item.Key].Done {
-		t.Fatal("my pull request item should not keep local done state")
-	}
-	if !data.Items[item.Key].DoneAt.IsZero() {
-		t.Fatal("my pull request item should not keep DoneAt")
-	}
-	if _, ok := data.Done[item.Key]; !ok {
-		t.Fatal("important done state should remain tracked separately")
+	got := store.Data().Feeds[model.FeedMyPullRequests].Items[0]
+	if got.Done || !got.DoneAt.IsZero() {
+		t.Fatalf("non-important item retained Done state: %#v", got)
 	}
 }

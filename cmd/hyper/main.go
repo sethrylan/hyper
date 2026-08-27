@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -54,7 +56,7 @@ func run() error {
 		return runDemo()
 	}
 
-	ctx, err := auth.Resolve("github.com")
+	authContext, err := auth.Resolve("github.com")
 	if err != nil {
 		return err
 	}
@@ -64,11 +66,17 @@ func run() error {
 		return fmt.Errorf("open cache: %w", err)
 	}
 
-	client := github.NewClient(ctx.Host, ctx.Token)
-	if updater := releaseUpdater(ctx.Token); updater != nil {
-		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
+	client := github.NewClient(authContext.Host, authContext.Token)
+	verifyContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	verifyErr := client.VerifyAccount(verifyContext, authContext.Account)
+	cancel()
+	if verifyErr != nil {
+		return fmt.Errorf("verify GitHub CLI active account: %w", verifyErr)
 	}
-	return runProgram(tui.New(client, store, ctx.Host))
+	if updater := releaseUpdater(authContext.Token); updater != nil {
+		return runProgram(tui.NewWithUpdater(client, store, authContext.Host, updater))
+	}
+	return runProgram(tui.New(client, store, authContext.Host))
 }
 
 func releaseUpdater(token string) *autoupdate.Service {

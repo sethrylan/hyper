@@ -37,6 +37,7 @@ The app is intentionally read-mostly for v1. It may mutate local state, but it m
 `hyper` must use the GitHub CLI for authentication only.
 
 - On startup, verify `gh` is installed and authenticated for `github.com`.
+- Resolve the locally selected GitHub CLI account, then verify the token owner with a direct API request before starting refresh or update commands.
 - If authentication is missing or expired, fail with clear setup instructions, for example `gh auth login`.
 - After auth validation, use the token to call GitHub APIs directly from Go rather than shelling out to `gh api`.
 - Prefer `github.com/cli/go-gh` for resolving the authenticated host/account/token context, combined with direct `net/http` calls for GraphQL where needed. Use `github.com/google/go-github` only where it materially reduces REST boilerplate.
@@ -95,15 +96,20 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Search results for My Pull Requests and My Issues: 500 each.
 - Poll periodically.
 - Cadence:
-  - Short refresh approximately every 60 seconds. It should use REST notifications updated since the last successful refresh, add or update Important items without removing cached items, re-run the `author:@me` searches so pull requests and issues the user just opened appear within a minute, and use a lightweight batched GraphQL lookup to refresh the titles, draft state, and merge/closed state of cached pull requests across all feeds.
-  - Full refresh approximately every 5 minutes. It remains authoritative for all feeds and for removing stale Important items.
+  - Refresh the newest page of My Pull Requests approximately every 5 seconds with one lightweight GraphQL request, merging those changes into the cached feed.
+  - Refresh REST notifications incrementally approximately every 15 seconds, adding or updating Important items without removing cached items.
+  - Reconcile all three feeds authoritatively approximately every 10 minutes. This refresh also updates rich Important-item metadata and removes stale items.
+- Run two independent refresh lanes and apply each successful result immediately. A slow background refresh must not delay My Pull Requests; the ten-minute authoritative refresh replaces all three feeds so stale pull requests are eventually removed.
 - Keep a local cache so the app can render recent results quickly on startup.
+- Store each feed and its successful-refresh timestamp independently so a fast pull request refresh cannot advance the incremental notification cursor or overwrite richer Important-item data.
+- Treat keeping Hyper's API usage below roughly 25% of each GitHub primary rate-limit window as a query-design and polling-cadence target, not a runtime quota. Never block, delay, or fail a request solely because Hyper has crossed that target.
 - On rate-limit pressure:
   - Show a warning in the status bar.
   - Reduce query depth before failing the whole app.
   - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
-- Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
+- Read account-wide core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
+- `r` refreshes the pull request lane from My Pull Requests and runs the authoritative background lane from Important Notifications or My Issues.
 
 ## Cache and local state
 
@@ -111,10 +117,9 @@ Use simple local storage under the user cache/config directory. Prefer XDG-compa
 
 Cache:
 
-- Normalized item payloads needed to render the three feeds.
-- Per-feed fetched item IDs.
+- Independent item payloads for each of the three feeds.
+- A successful-refresh timestamp for each feed.
 - Local done state.
-- Last successful refresh metadata.
 - Current authenticated account and host metadata.
 
 Local state identity must include host or full URL, not only GitHub node ID, so future host/account support does not collide with existing cache data.
@@ -201,6 +206,7 @@ Required actions:
 | Copy URL | `y` | Copy selected item URL |
 | Open in browser | `o` | Open selected item’s underlying URL |
 | Refresh | `r` | Trigger manual refresh |
+| View rate limits | Shift+R | Show GitHub account rate limits |
 | Help | `?` | Show fullscreen keybinding/help view |
 | Quit | `q` or Ctrl+C | Exit |
 

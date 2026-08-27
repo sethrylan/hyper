@@ -41,12 +41,12 @@ func TestRefreshUsesReconciledDoneCache(t *testing.T) {
 		selectedByFeed: map[model.Feed]int{},
 		store:          store,
 	}
-	updated, _ := m.Update(refreshMsg{
-		result: github.RefreshResult{
-			Account: "me",
-			Feeds: map[model.Feed][]model.Item{
-				model.FeedImportantNotifications: {item},
-			},
+	updated, _ := m.Update(feedRefreshMsg{
+		kind: refreshNotifications,
+		result: github.FeedRefreshResult{
+			Account:     "me",
+			Feed:        model.FeedImportantNotifications,
+			Items:       []model.Item{item},
 			RefreshedAt: updatedAt.Add(2 * time.Hour),
 		},
 	})
@@ -144,7 +144,7 @@ func TestDoneActionIsIgnoredOutsideImportantNotifications(t *testing.T) {
 	}
 }
 
-func TestFeedsFromCacheClearsDoneOutsideImportantNotifications(t *testing.T) {
+func TestFeedsFromCacheKeepsPerFeedCopies(t *testing.T) {
 	item := model.Item{
 		Done:            true,
 		DoneAt:          time.Date(2026, 5, 13, 14, 0, 0, 0, time.UTC),
@@ -159,17 +159,16 @@ func TestFeedsFromCacheClearsDoneOutsideImportantNotifications(t *testing.T) {
 		URL:             "https://github.com/owner/repo/pull/1",
 	}
 	feeds := feedsFromCache(cache.Data{
-		FeedItemIDs: map[model.Feed][]string{
-			model.FeedImportantNotifications: {item.Key},
-			model.FeedMyPullRequests:         {item.Key},
+		Feeds: map[model.Feed]cache.FeedData{
+			model.FeedImportantNotifications: {Items: []model.Item{item}},
+			model.FeedMyPullRequests:         {Items: []model.Item{{Key: item.Key, Title: item.Title}}},
 		},
-		Items: map[string]model.Item{item.Key: item},
 	})
 
 	if !feeds[model.FeedImportantNotifications][0].Done {
 		t.Fatal("important notification should preserve done state")
 	}
-	if feeds[model.FeedMyPullRequests][0].Done {
-		t.Fatal("my pull requests should clear done state")
+	if feeds[model.FeedMyPullRequests][0].Done || feeds[model.FeedMyPullRequests][0].Title != item.Title {
+		t.Fatal("my pull requests should use its independent cached copy")
 	}
 }

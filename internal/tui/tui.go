@@ -4,7 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
-	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,18 +21,20 @@ import (
 )
 
 const (
-	shortRefresh  = time.Minute
-	fullRefresh   = 5 * time.Minute
-	progressTick  = time.Second
-	updateTimeout = 30 * time.Second
-	unknownValue  = "unknown"
+	pullRequestRefresh  = 5 * time.Second
+	notificationRefresh = 15 * time.Second
+	fullRefresh         = 10 * time.Minute
+	refreshHeartbeat    = 5 * time.Second
+	progressTick        = time.Second
+	updateTimeout       = 30 * time.Second
+	unknownValue        = "unknown"
 )
 
 type service interface {
-	CurrentProgress() github.RefreshProgress
 	RateLimits(ctx context.Context) (github.RateLimits, error)
-	Refresh(ctx context.Context) (github.RefreshResult, error)
-	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.NotificationRefreshResult, error)
+	RefreshBackground(ctx context.Context) (github.RefreshResult, error)
+	RefreshNotifications(ctx context.Context, request github.NotificationRefreshRequest) (github.FeedRefreshResult, error)
+	RefreshPullRequests(ctx context.Context) (github.FeedRefreshResult, error)
 }
 
 type updateService interface {
@@ -42,40 +44,45 @@ type updateService interface {
 type refreshKind int
 
 const (
-	refreshFull refreshKind = iota
+	refreshPullRequests refreshKind = iota
 	refreshNotifications
+	refreshBackground
 )
 
 //nolint:containedctx,recvcheck // Bubble Tea models own command lifecycle; value receivers are required by tea.Model usage.
 type Model struct {
-	account           string
-	activeFeed        int
-	cancel            context.CancelFunc
-	ctx               context.Context
-	expanded          map[string]bool
-	feeds             map[model.Feed][]model.Item
-	height            int
-	host              string
-	lastFullRefreshAt time.Time
-	loading           bool
-	loadingAt         time.Time
-	rateWarning       string
-	rateLimits        github.RateLimits
-	rateLimitsErr     string
-	rateLimitsLoading bool
-	refreshProgress   github.RefreshProgress
-	rows              []row
-	selected          int
-	selectedByFeed    map[model.Feed]int
-	service           service
-	showHelp          bool
-	showRateLimits    bool
-	spinner           int
-	status            string
-	store             *cache.Store
-	updateNotice      string
-	updater           updateService
-	width             int
+	account             string
+	activeFeed          int
+	backgroundLoading   bool
+	backgroundStart     time.Time
+	cancel              context.CancelFunc
+	ctx                 context.Context
+	expanded            map[string]bool
+	feeds               map[model.Feed][]model.Item
+	height              int
+	host                string
+	nextBackground      time.Time
+	nextNotifications   time.Time
+	nextPullRequests    time.Time
+	pullRequestsLoading bool
+	pullRequestsStart   time.Time
+	pullRequestWarning  string
+	backgroundWarning   string
+	rateLimits          github.RateLimits
+	rateLimitsErr       string
+	rateLimitsLoading   bool
+	rows                []row
+	selected            int
+	selectedByFeed      map[model.Feed]int
+	service             service
+	showHelp            bool
+	showRateLimits      bool
+	spinner             int
+	status              string
+	store               *cache.Store
+	updateNotice        string
+	updater             updateService
+	width               int
 }
 
 type rowKind int
@@ -92,13 +99,14 @@ type row struct {
 	repo string
 }
 
-type refreshMsg struct {
-	result github.RefreshResult
+type feedRefreshMsg struct {
+	kind   refreshKind
+	result github.FeedRefreshResult
 	err    error
 }
 
-type notificationRefreshMsg struct {
-	result github.NotificationRefreshResult
+type backgroundRefreshMsg struct {
+	result github.RefreshResult
 	err    error
 }
 
@@ -128,7 +136,7 @@ func NewWithUpdater(service service, store *cache.Store, host string, updater up
 // NewCached creates a model that reads and writes cache state without contacting GitHub.
 func NewCached(store *cache.Store, host string) Model {
 	m := newModel(nil, store, host, nil)
-	if refreshedAt := store.Data().LastRefresh; !refreshedAt.IsZero() {
+	if refreshedAt := latestRefresh(store.Data()); !refreshedAt.IsZero() {
 		m.status = "refreshed " + refreshedAt.Format(time.Kitchen)
 	}
 	return m
@@ -139,20 +147,24 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now()
 	m := Model{
-		account:           data.Account,
-		cancel:            cancel,
-		ctx:               ctx,
-		expanded:          map[string]bool{},
-		feeds:             feedsFromCache(data),
-		host:              host,
-		lastFullRefreshAt: now,
-		loading:           service != nil,
-		loadingAt:         now,
-		selectedByFeed:    map[model.Feed]int{},
-		service:           service,
-		status:            cacheStatus(data),
-		store:             store,
-		updater:           updater,
+		account:             data.Account,
+		backgroundLoading:   service != nil,
+		backgroundStart:     now,
+		cancel:              cancel,
+		ctx:                 ctx,
+		expanded:            map[string]bool{},
+		feeds:               feedsFromCache(data),
+		host:                host,
+		nextBackground:      now.Add(fullRefresh),
+		nextNotifications:   now.Add(notificationRefresh),
+		nextPullRequests:    now.Add(pullRequestRefresh),
+		pullRequestsLoading: service != nil,
+		pullRequestsStart:   now,
+		selectedByFeed:      map[model.Feed]int{},
+		service:             service,
+		status:              cacheStatus(data),
+		store:               store,
+		updater:             updater,
 	}
 	for _, feed := range model.Feeds {
 		m.expanded["feed:"+string(feed)] = true
@@ -164,7 +176,13 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{tea.RequestWindowSize, tea.RequestBackgroundColor}
 	if m.service != nil {
-		cmds = append(cmds, m.startRefreshCmd(refreshFull), tickCmd())
+		cmds = append(cmds,
+			m.refreshCmd(refreshPullRequests),
+			m.refreshCmd(refreshBackground),
+			tickCmd(),
+			progressTickCmd(),
+			m.rateLimitsCmd(),
+		)
 	}
 	if m.updater != nil {
 		cmds = append(cmds, m.updateCmd())
@@ -181,60 +199,85 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleAction(ActionForKey(msg.Keystroke()))
-	case refreshMsg:
-		m.loading = false
-		m.refreshProgress = github.RefreshProgress{}
+	case feedRefreshMsg:
+		m.finishRefresh(msg.kind)
 		if msg.err != nil {
-			m.status = "refresh failed: " + msg.err.Error()
+			m.status = refreshName(msg.kind) + " refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
-		if err := m.store.Replace(msg.result.Account, m.host, msg.result.Feeds, msg.result.RefreshedAt); err != nil {
+		account := m.account
+		if msg.result.Account != "" {
+			account = msg.result.Account
+		}
+		items := msg.result.Items
+		if msg.kind == refreshPullRequests {
+			items = mergeFeedChanges(m.feeds[msg.result.Feed], items)
+		}
+		if err := m.store.ReplaceFeeds(account, m.host, map[model.Feed][]model.Item{
+			msg.result.Feed: items,
+		}, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
 		}
-		m.account = msg.result.Account
+		m.account = account
 		m.feeds = feedsFromCache(m.store.Data())
-		m.rateWarning = msg.result.RateWarning
-		m.status = "refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
+		if msg.kind == refreshPullRequests {
+			m.pullRequestWarning = msg.result.RateWarning
+		} else {
+			m.backgroundWarning = msg.result.RateWarning
+		}
+		m.status = msg.result.Feed.Title() + " refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
-	case notificationRefreshMsg:
-		m.loading = false
-		m.refreshProgress = github.RefreshProgress{}
+	case backgroundRefreshMsg:
+		m.finishRefresh(refreshBackground)
 		if msg.err != nil {
-			m.status = "notification refresh failed: " + msg.err.Error()
+			m.status = "background refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
-		feeds := cloneFeeds(m.feeds)
-		maps.Copy(feeds, msg.result.Feeds)
-		applyPullRequestMetadata(feeds, msg.result.PullRequests)
-		if err := m.store.Replace(msg.result.Account, m.host, feeds, msg.result.RefreshedAt); err != nil {
+		account := m.account
+		if msg.result.Account != "" {
+			account = msg.result.Account
+		}
+		if err := m.store.ReplaceFeeds(account, m.host, msg.result.Feeds, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
 		}
-		m.account = msg.result.Account
+		m.account = account
 		m.feeds = feedsFromCache(m.store.Data())
-		m.rateWarning = mergeWarnings(m.rateWarning, msg.result.RateWarning)
-		m.status = "quick refresh " + msg.result.RefreshedAt.Format(time.Kitchen)
+		m.backgroundWarning = msg.result.RateWarning
+		m.status = "background refreshed " + msg.result.RefreshedAt.Format(time.Kitchen)
 		m.rebuildRows()
 	case tickMsg:
 		if m.service == nil {
 			return m, nil
 		}
 		cmds := []tea.Cmd{tickCmd()}
-		if !m.loading {
-			kind := m.automaticRefreshKind(msg.at)
-			if kind == refreshFull {
-				m.lastFullRefreshAt = msg.at
+		wasLoading := m.refreshing()
+		if !m.pullRequestsLoading && !msg.at.Before(m.nextPullRequests) {
+			m.beginRefresh(refreshPullRequests, msg.at)
+			m.nextPullRequests = msg.at.Add(pullRequestRefresh)
+			cmds = append(cmds, m.refreshCmd(refreshPullRequests))
+		}
+		if !m.backgroundLoading {
+			switch {
+			case !msg.at.Before(m.nextBackground):
+				m.beginRefresh(refreshBackground, msg.at)
+				m.nextBackground = msg.at.Add(fullRefresh)
+				m.nextNotifications = msg.at.Add(notificationRefresh)
+				cmds = append(cmds, m.refreshCmd(refreshBackground))
+			case !msg.at.Before(m.nextNotifications):
+				m.beginRefresh(refreshNotifications, msg.at)
+				m.nextNotifications = msg.at.Add(notificationRefresh)
+				cmds = append(cmds, m.refreshCmd(refreshNotifications))
 			}
-			m.loading = true
-			m.loadingAt = msg.at
-			cmds = append(cmds, m.startRefreshCmd(kind))
+		}
+		if !wasLoading && m.refreshing() {
+			cmds = append(cmds, progressTickCmd())
 		}
 		return m, tea.Batch(cmds...)
 	case progressTickMsg:
-		if m.loading && m.service != nil {
+		if m.refreshing() && m.service != nil {
 			m.spinner++
-			m.refreshProgress = m.service.CurrentProgress()
 			return m, progressTickCmd()
 		}
 	case rateLimitsMsg:
@@ -291,12 +334,21 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 			m.status = "cache-only mode"
 			return m, nil
 		}
-		if !m.loading {
+		kind := refreshKindForFeed(model.Feeds[m.activeFeed])
+		if !m.refreshLoading(kind) {
 			now := time.Now()
-			m.lastFullRefreshAt = now
-			m.loading = true
-			m.loadingAt = now
-			return m, m.startRefreshCmd(refreshFull)
+			wasLoading := m.refreshing()
+			m.beginRefresh(kind, now)
+			if kind == refreshPullRequests {
+				m.nextPullRequests = now.Add(pullRequestRefresh)
+			} else {
+				m.nextBackground = now.Add(fullRefresh)
+				m.nextNotifications = now.Add(notificationRefresh)
+			}
+			if !wasLoading {
+				return m, tea.Batch(m.refreshCmd(kind), progressTickCmd())
+			}
+			return m, m.refreshCmd(kind)
 		}
 	case ActionRateLimits:
 		if m.service == nil {
@@ -476,27 +528,39 @@ func (m *Model) replaceItem(item model.Item) {
 	}
 }
 
-func (m Model) refreshCmd() tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
-		defer cancel()
-		result, err := m.service.Refresh(ctx)
-		return refreshMsg{result: result, err: err}
-	}
-}
-
-func (m Model) notificationRefreshCmd() tea.Cmd {
-	request := github.NotificationRefreshRequest{
-		Account:            m.account,
-		Existing:           append([]model.Item(nil), m.feeds[model.FeedImportantNotifications]...),
-		PullRequestNodeIDs: pullRequestNodeIDs(m.feeds),
-		Since:              m.store.Data().LastRefresh,
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
-		defer cancel()
-		result, err := m.service.RefreshNotifications(ctx, request)
-		return notificationRefreshMsg{result: result, err: err}
+func (m Model) refreshCmd(kind refreshKind) tea.Cmd {
+	switch kind {
+	case refreshPullRequests:
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
+			defer cancel()
+			result, err := m.service.RefreshPullRequests(ctx)
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		}
+	case refreshNotifications:
+		cached := m.store.Data().Feeds[model.FeedImportantNotifications]
+		request := github.NotificationRefreshRequest{
+			Account:  m.account,
+			Existing: append([]model.Item(nil), cached.Items...),
+			Since:    cached.RefreshedAt,
+		}
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
+			defer cancel()
+			result, err := m.service.RefreshNotifications(ctx, request)
+			return feedRefreshMsg{kind: kind, result: result, err: err}
+		}
+	case refreshBackground:
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(m.ctx, 6*time.Minute)
+			defer cancel()
+			result, err := m.service.RefreshBackground(ctx)
+			return backgroundRefreshMsg{result: result, err: err}
+		}
+	default:
+		return func() tea.Msg {
+			return feedRefreshMsg{kind: kind, err: fmt.Errorf("unknown refresh kind %d", kind)}
+		}
 	}
 }
 
@@ -517,29 +581,71 @@ func (m Model) updateCmd() tea.Cmd {
 	}
 }
 
-func (m Model) startRefreshCmd(kind refreshKind) tea.Cmd {
-	var refresh tea.Cmd
-	if kind == refreshFull {
-		refresh = m.refreshCmd()
-	} else {
-		refresh = m.notificationRefreshCmd()
-	}
-	return tea.Batch(refresh, progressTickCmd())
-}
-
 func tickCmd() tea.Cmd {
-	return tea.Tick(shortRefresh, func(at time.Time) tea.Msg { return tickMsg{at: at} })
-}
-
-func (m Model) automaticRefreshKind(at time.Time) refreshKind {
-	if at.Sub(m.lastFullRefreshAt) >= fullRefresh {
-		return refreshFull
-	}
-	return refreshNotifications
+	return tea.Tick(refreshHeartbeat, func(at time.Time) tea.Msg { return tickMsg{at: at} })
 }
 
 func progressTickCmd() tea.Cmd {
 	return tea.Tick(progressTick, func(time.Time) tea.Msg { return progressTickMsg{} })
+}
+
+func refreshKindForFeed(feed model.Feed) refreshKind {
+	if feed == model.FeedMyPullRequests {
+		return refreshPullRequests
+	}
+	return refreshBackground
+}
+
+func refreshName(kind refreshKind) string {
+	switch kind {
+	case refreshPullRequests:
+		return "pull request"
+	case refreshNotifications:
+		return "notification"
+	case refreshBackground:
+		return "background"
+	default:
+		return "unknown"
+	}
+}
+
+func (m Model) refreshLoading(kind refreshKind) bool {
+	if kind == refreshPullRequests {
+		return m.pullRequestsLoading
+	}
+	return m.backgroundLoading
+}
+
+func (m *Model) beginRefresh(kind refreshKind, at time.Time) {
+	if kind == refreshPullRequests {
+		m.pullRequestsLoading = true
+		m.pullRequestsStart = at
+		return
+	}
+	m.backgroundLoading = true
+	m.backgroundStart = at
+}
+
+func (m *Model) finishRefresh(kind refreshKind) {
+	if kind == refreshPullRequests {
+		m.pullRequestsLoading = false
+		return
+	}
+	m.backgroundLoading = false
+}
+
+func (m Model) refreshing() bool {
+	return m.pullRequestsLoading || m.backgroundLoading
+}
+
+func (m Model) refreshStartedAt() time.Time {
+	if !m.pullRequestsLoading {
+		return m.backgroundStart
+	}
+	if !m.backgroundLoading || m.pullRequestsStart.Before(m.backgroundStart) {
+		return m.pullRequestsStart
+	}
+	return m.backgroundStart
 }
 
 func (m *Model) rebuildRows() {
@@ -653,7 +759,7 @@ func (m Model) renderFooterHelp() string {
 	}
 	parts = append(parts, "y copy", "o/enter open")
 	if m.service != nil {
-		parts = append(parts, "r refresh")
+		parts = append(parts, "r refresh feed")
 	}
 	parts = append(parts, "? help", "q quit")
 	return strings.Join(parts, "  ")
@@ -774,15 +880,11 @@ func (m Model) renderStatus() string {
 		account = "unknown"
 	}
 	status := m.status
-	if m.loading {
-		progress := m.refreshProgress.String()
-		if progress == "" {
-			progress = "from GitHub"
-		}
-		status = fmt.Sprintf("%s refreshing %s (%s)", spinnerFrame(m.spinner), progress, formatDuration(time.Since(m.loadingAt)))
+	if m.refreshing() {
+		status = fmt.Sprintf("%s refreshing from GitHub (%s)", spinnerFrame(m.spinner), formatDuration(time.Since(m.refreshStartedAt())))
 	}
-	if m.rateWarning != "" {
-		status = status + " | " + m.rateWarning
+	if warning := m.rateWarning(); warning != "" {
+		status = status + " | " + warning
 	}
 	if m.updateNotice != "" {
 		status = status + " | " + m.updateNotice
@@ -803,7 +905,7 @@ func (m Model) renderHelp() string {
 		"o/enter       open selected item URL",
 	}
 	if m.service != nil {
-		lines = append(lines, "r             refresh", "shift+r       show rate limits")
+		lines = append(lines, "r             refresh active lane", "shift+r       show rate limits")
 	}
 	lines = append(lines,
 		"tab           next feed",
@@ -828,6 +930,7 @@ func (m Model) renderRateLimits() string {
 		lines = append(lines, "failed to load rate limits: "+m.rateLimitsErr)
 	default:
 		lines = append(lines,
+			"GitHub account",
 			renderRateLimitLine("REST/core", m.rateLimits.Core),
 			renderRateLimitLine("GraphQL", m.rateLimits.GraphQL),
 			renderRateLimitLine("Search", m.rateLimits.Search),
@@ -855,89 +958,39 @@ func renderRateLimitLine(label string, resource github.RateLimitResource) string
 	return fmt.Sprintf("%-10s %5d/%-5d remaining, %5d used, resets %s", label, resource.Remaining, resource.Limit, resource.Used, reset)
 }
 
-func cloneFeeds(feeds map[model.Feed][]model.Item) map[model.Feed][]model.Item {
-	clone := make(map[model.Feed][]model.Item, len(feeds))
-	for feed, items := range feeds {
-		clone[feed] = append([]model.Item(nil), items...)
-	}
-	return clone
-}
-
-func pullRequestNodeIDs(feeds map[model.Feed][]model.Item) []string {
-	seen := map[string]struct{}{}
-	var ids []string
-	for _, feed := range model.Feeds {
-		for _, item := range feeds[feed] {
-			if item.Type != model.ItemTypePullRequest || item.NodeID == "" {
-				continue
-			}
-			if _, ok := seen[item.NodeID]; ok {
-				continue
-			}
-			seen[item.NodeID] = struct{}{}
-			ids = append(ids, item.NodeID)
+func (m Model) rateWarning() string {
+	warnings := make([]string, 0, 2)
+	for _, warning := range []string{m.pullRequestWarning, m.backgroundWarning} {
+		if warning != "" && !slices.Contains(warnings, warning) {
+			warnings = append(warnings, warning)
 		}
 	}
-	return ids
-}
-
-func applyPullRequestMetadata(feeds map[model.Feed][]model.Item, updates []github.PullRequestMetadata) {
-	byNodeID := make(map[string]github.PullRequestMetadata, len(updates))
-	for _, update := range updates {
-		if update.NodeID != "" {
-			byNodeID[update.NodeID] = update
-		}
-	}
-	for feed, items := range feeds {
-		for i, item := range items {
-			update, ok := byNodeID[item.NodeID]
-			if !ok {
-				continue
-			}
-			if update.Title != "" {
-				item.Title = update.Title
-			}
-			if update.State != "" {
-				item.State = update.State
-			}
-			item.Draft = update.Draft
-			item.Merged = update.Merged
-			if !update.UpdatedAt.IsZero() {
-				item.UpdatedAt = update.UpdatedAt
-			}
-			items[i] = item
-		}
-		feeds[feed] = items
-	}
-}
-
-func mergeWarnings(existing, incoming string) string {
-	switch {
-	case existing == "":
-		return incoming
-	case incoming == "", strings.Contains(existing, incoming):
-		return existing
-	default:
-		return existing + "; " + incoming
-	}
+	return strings.Join(warnings, "; ")
 }
 
 func feedsFromCache(data cache.Data) map[model.Feed][]model.Item {
 	feeds := map[model.Feed][]model.Item{}
 	for _, feed := range model.Feeds {
-		for _, key := range data.FeedItemIDs[feed] {
-			item, ok := data.Items[key]
-			if !ok {
-				continue
-			}
-			if feed != model.FeedImportantNotifications {
-				item.Done = false
-				item.DoneAt = time.Time{}
-			}
-			feeds[feed] = append(feeds[feed], item)
-		}
+		feeds[feed] = append([]model.Item(nil), data.Feeds[feed].Items...)
 	}
 	return feeds
+}
+
+func mergeFeedChanges(existing, changed []model.Item) []model.Item {
+	items := append([]model.Item(nil), existing...)
+	index := make(map[string]int, len(items))
+	for i, item := range items {
+		index[item.Key] = i
+	}
+	for _, item := range changed {
+		if i, ok := index[item.Key]; ok {
+			items[i] = item
+			continue
+		}
+		index[item.Key] = len(items)
+		items = append(items, item)
+	}
+	return items
 }
 
 func spinnerFrame(frame int) string {
@@ -960,13 +1013,23 @@ func formatDuration(d time.Duration) string {
 
 func cacheStatus(data cache.Data) string {
 	count := 0
-	for _, keys := range data.FeedItemIDs {
-		count += len(keys)
+	for _, feed := range data.Feeds {
+		count += len(feed.Items)
 	}
 	if count == 0 {
 		return "cache empty"
 	}
 	return fmt.Sprintf("cache ready (%d items)", count)
+}
+
+func latestRefresh(data cache.Data) time.Time {
+	var latest time.Time
+	for _, feed := range data.Feeds {
+		if feed.RefreshedAt.After(latest) {
+			latest = feed.RefreshedAt
+		}
+	}
+	return latest
 }
 
 func typeIcon(item model.Item) string {
