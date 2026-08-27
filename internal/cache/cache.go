@@ -71,6 +71,18 @@ func (s *Store) Data() Data {
 	return cloneData(s.data)
 }
 
+// SetIdentity clears cached feeds before they can be reused for another account or host.
+func (s *Store) SetIdentity(account, host string) error {
+	ensureMaps(&s.data)
+	if s.data.Account == account && s.data.Host == host {
+		return nil
+	}
+	s.data.Account = account
+	s.data.Host = host
+	s.data.Feeds = map[model.Feed]FeedData{}
+	return s.save()
+}
+
 // ReplaceFeeds replaces only the supplied feeds and advances their cursors.
 func (s *Store) ReplaceFeeds(account, host string, feeds map[model.Feed][]model.Item, refreshedAt time.Time) error {
 	ensureMaps(&s.data)
