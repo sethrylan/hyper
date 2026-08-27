@@ -51,5 +51,8 @@ hyper
 | `y` | Copy URL |
 | `E` | Mark done (Important Notifications) |
 | `r` | Refresh active lane |
+| `shift+r` | Show GitHub account rate limits |
 | `?` | Help |
 | `q` | Quit |
+
+Hyper aims to keep its polling and query usage modest, but it does not enforce a separate local API budget. The status bar and rate-limit screen report limits returned by GitHub.

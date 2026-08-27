@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/model"
-	"github.com/sethrylan/hyper/internal/quota"
 )
 
 func TestRateLimitsUsesRESTOnly(t *testing.T) {
@@ -40,27 +38,8 @@ func TestRateLimitsUsesRESTOnly(t *testing.T) {
 	}
 }
 
-func TestRateLimitsConfigureEnforcementBudget(t *testing.T) {
-	now := time.Now()
-	budget := quota.NewManager("github.com", "me")
-	client := NewBudgetedClient("github.com", "token", budget)
-	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return jsonResponse(fmt.Sprintf(`{"resources":{"core":{"limit":5000,"used":10,"remaining":4990,"reset":%d},"graphql":{"limit":5000,"used":20,"remaining":4980,"reset":%d},"search":{"limit":30,"used":0,"remaining":30,"reset":%d}}}`, now.Add(time.Hour).Unix(), now.Add(time.Hour).Unix(), now.Add(time.Minute).Unix())), nil
-	})}
-
-	_, err := client.RateLimits(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state := budget.Status(now)
-	if state.Resources[quota.ResourceCore].Limit != 5000 || state.Resources[quota.ResourceGraphQL].Limit != 5000 || state.Resources[quota.ResourceSearch].Limit != 30 {
-		t.Fatalf("configured limits = %#v, want GitHub limits copied into enforcement budget", state.Resources)
-	}
-}
-
-func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
-	budget := quota.NewManager("github.com", "me")
-	client := NewBudgetedClient("github.com", "token", budget)
+func TestPullRequestRefreshUsesLightweightAuthoredSearch(t *testing.T) {
+	client := NewClient("github.com", "token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -78,9 +57,6 @@ func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
 	}
 	if result.Feed != model.FeedMyPullRequests {
 		t.Fatalf("feed = %s, want My Pull Requests", result.Feed)
-	}
-	if got := budget.Status(time.Now()).Resources[quota.ResourceGraphQL].Used; got != 1 {
-		t.Fatalf("recorded GraphQL usage = %d, want actual cost 1", got)
 	}
 }
 
@@ -111,61 +87,31 @@ func TestPullRequestRefreshFetchesOnlyNewestPage(t *testing.T) {
 	}
 }
 
-func TestGraphQLReservationCostsAreUpperBounds(t *testing.T) {
-	tests := map[string]int{
-		authoredSearchGraphQL: 1,
-		searchGraphQL:         5,
-		nodesGraphQL:          3,
-	}
-	for document, want := range tests {
-		body, err := json.Marshal(map[string]any{"query": document})
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := graphQLReservationCost(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatalf("reservation cost = %d, want %d", got, want)
-		}
-	}
-	if _, err := graphQLReservationCost([]byte(`{"query":"query Unknown { viewer { login } }"}`)); err == nil {
-		t.Fatal("expected unnamed GraphQL document to fail closed")
-	}
-}
-
-func TestBudgetExhaustionStopsRequestBeforeDispatch(t *testing.T) {
-	now := time.Now()
-	budget := quota.NewManager("github.com", "me")
-	if err := budget.Configure(quota.ResourceGraphQL, 20, now.Add(time.Hour), now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := budget.Reserve(quota.ResourceGraphQL, 4, now); err != nil {
-		t.Fatal(err)
-	}
+func TestPullRequestRefreshContinuesWhenGitHubRateLimitIsLow(t *testing.T) {
 	calls := 0
-	client := NewBudgetedClient("github.com", "token", budget)
+	client := NewClient("github.com", "token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		calls++
-		return emptySearchResponse(), nil
+		return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]},"rateLimit":{"cost":1,"remaining":1}}}`), nil
 	})}
 
-	if _, err := client.RefreshPullRequests(t.Context()); err == nil {
-		t.Fatal("expected Hyper budget exhaustion")
+	result, err := client.RefreshPullRequests(t.Context())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if calls != 0 {
-		t.Fatalf("HTTP calls = %d, want none after budget rejection", calls)
+	if calls != 1 {
+		t.Fatalf("HTTP calls = %d, want request to proceed", calls)
+	}
+	if !strings.Contains(result.RateWarning, "rate limit low") {
+		t.Fatalf("rate warning = %q, want low-limit warning", result.RateWarning)
 	}
 }
 
-func TestAccountVerificationKeepsExistingQuotaReservations(t *testing.T) {
-	budget := quota.NewManager("github.com", "new-account")
-	if _, err := budget.Reserve(quota.ResourceCore, 1, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	client := NewBudgetedClient("github.com", "token", budget)
+func TestAccountVerificationDispatchesRequest(t *testing.T) {
+	client := NewClient("github.com", "token")
+	calls := 0
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
 		if req.URL.Path != "/user" {
 			t.Fatalf("path = %q, want /user", req.URL.Path)
 		}
@@ -175,8 +121,8 @@ func TestAccountVerificationKeepsExistingQuotaReservations(t *testing.T) {
 	if err := client.VerifyAccount(t.Context(), "new-account"); err != nil {
 		t.Fatal(err)
 	}
-	if got := budget.Status(time.Now()).Resources[quota.ResourceCore].Used; got != 2 {
-		t.Fatalf("core usage = %d, want prior reservation plus accounted identity lookup", got)
+	if calls != 1 {
+		t.Fatalf("HTTP calls = %d, want one account verification request", calls)
 	}
 }
 

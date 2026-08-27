@@ -5,11 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	selfupdate "github.com/creativeprojects/go-selfupdate"
-
-	"github.com/sethrylan/hyper/internal/quota"
 )
 
 const checksumFilename = "hyper_checksums.txt"
@@ -26,7 +23,6 @@ type Result struct {
 
 type Service struct {
 	backend        backend
-	budget         *quota.Manager
 	currentVersion string
 	executablePath func() (string, error)
 }
@@ -42,10 +38,6 @@ type githubBackend struct {
 }
 
 func New(token, currentVersion string) (*Service, error) {
-	return NewBudgeted(token, currentVersion, nil)
-}
-
-func NewBudgeted(token, currentVersion string, budget *quota.Manager) (*Service, error) {
 	source, err := selfupdate.NewGitHubSource(selfupdate.GitHubConfig{APIToken: token})
 	if err != nil {
 		return nil, fmt.Errorf("create GitHub release source: %w", err)
@@ -62,20 +54,12 @@ func NewBudgeted(token, currentVersion string, budget *quota.Manager) (*Service,
 			repository: selfupdate.NewRepositorySlug("sethrylan", "hyper"),
 			updater:    updater,
 		},
-		budget:         budget,
 		currentVersion: currentVersion,
 		executablePath: selfupdate.ExecutablePath,
 	}, nil
 }
 
 func (s *Service) Update(ctx context.Context) Result {
-	if s.budget != nil {
-		// DetectLatest uses one core request; applying an update can use two more
-		// to fetch the binary and checksum. Reserve the worst case up front.
-		if _, err := s.budget.Reserve(quota.ResourceCore, 3, time.Now()); err != nil {
-			return Result{}
-		}
-	}
 	candidate, newer, err := s.backend.Latest(ctx, s.currentVersion)
 	if err != nil || !newer {
 		return Result{}

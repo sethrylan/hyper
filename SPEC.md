@@ -37,7 +37,7 @@ The app is intentionally read-mostly for v1. It may mutate local state, but it m
 `hyper` must use the GitHub CLI for authentication only.
 
 - On startup, verify `gh` is installed and authenticated for `github.com`.
-- Resolve the locally selected GitHub CLI account before opening its API usage ledger, then verify the token owner with a budgeted request before starting refresh or update commands.
+- Resolve the locally selected GitHub CLI account, then verify the token owner with a direct API request before starting refresh or update commands.
 - If authentication is missing or expired, fail with clear setup instructions, for example `gh auth login`.
 - After auth validation, use the token to call GitHub APIs directly from Go rather than shelling out to `gh api`.
 - Prefer `github.com/cli/go-gh` for resolving the authenticated host/account/token context, combined with direct `net/http` calls for GraphQL where needed. Use `github.com/google/go-github` only where it materially reduces REST boilerplate.
@@ -102,13 +102,10 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
 - Run two independent refresh lanes and apply each successful result immediately. A slow background refresh must not delay My Pull Requests; the ten-minute authoritative refresh replaces all three feeds so stale pull requests are eventually removed.
 - Keep a local cache so the app can render recent results quickly on startup.
 - Store each feed and its successful-refresh timestamp independently so a fast pull request refresh cannot advance the incremental notification cursor or overwrite richer Important-item data.
-- Keep Hyper's own API usage strictly below 25% of every GitHub primary rate-limit window. With 5,000-point core and GraphQL limits, Hyper may use at most 1,249 requests or points per window; with a 30-request search limit, it may use at most 7.
-- Allow only one running Hyper process to own the shared API usage ledger at a time.
-- Persist API usage reservations before sending requests, reconcile GraphQL reservations against `rateLimit.cost`, and retain enough GraphQL capacity for the five-second pull request cadence before admitting lower-priority work.
+- Treat keeping Hyper's API usage below roughly 25% of each GitHub primary rate-limit window as a query-design and polling-cadence target, not a runtime quota. Never block, delay, or fail a request solely because Hyper has crossed that target.
 - On rate-limit pressure:
   - Show a warning in the status bar.
   - Reduce query depth before failing the whole app.
-  - Defer lower-priority refreshes before slowing My Pull Requests.
   - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
 - Read account-wide core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
@@ -124,8 +121,6 @@ Cache:
 - A successful-refresh timestamp for each feed.
 - Local done state.
 - Current authenticated account and host metadata.
-
-Persist Hyper's API usage ledger separately from the feed cache so each API reservation does not rewrite cached items.
 
 Local state identity must include host or full URL, not only GitHub node ID, so future host/account support does not collide with existing cache data.
 
@@ -211,6 +206,7 @@ Required actions:
 | Copy URL | `y` | Copy selected item URL |
 | Open in browser | `o` | Open selected item’s underlying URL |
 | Refresh | `r` | Trigger manual refresh |
+| View rate limits | Shift+R | Show GitHub account rate limits |
 | Help | `?` | Show fullscreen keybinding/help view |
 | Quit | `q` or Ctrl+C | Exit |
 

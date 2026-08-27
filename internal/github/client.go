@@ -17,7 +17,6 @@ import (
 
 	"github.com/sethrylan/hyper/internal/filter"
 	"github.com/sethrylan/hyper/internal/model"
-	"github.com/sethrylan/hyper/internal/quota"
 )
 
 const (
@@ -26,17 +25,13 @@ const (
 	maxSearchResults     = 2000
 	maxRetries           = 10
 	maxRetryDelay        = 60 * time.Second
-	fastPullRequestPoll  = 5 * time.Second
 
 	notificationReasonMention = "MENTION"
 )
 
 var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
-type pullRequestPriorityKey struct{}
-
 type Client struct {
-	budget     *quota.Manager
 	host       string
 	httpClient *http.Client
 	retrySleep func(context.Context, time.Duration) error
@@ -102,12 +97,6 @@ func NewClient(host, token string) *Client {
 	}
 }
 
-func NewBudgetedClient(host, token string, budget *quota.Manager) *Client {
-	client := NewClient(host, token)
-	client.budget = budget
-	return client
-}
-
 func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 	var restResponse struct {
 		Resources struct {
@@ -119,19 +108,6 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 	if _, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/rate_limit", c.host), nil, &restResponse); err != nil {
 		return RateLimits{}, fmt.Errorf("fetch REST rate limits: %w", err)
 	}
-	if c.budget != nil {
-		now := time.Now()
-		for resource, limit := range map[quota.Resource]restRateLimitResource{
-			quota.ResourceCore:    restResponse.Resources.Core,
-			quota.ResourceGraphQL: restResponse.Resources.GraphQL,
-			quota.ResourceSearch:  restResponse.Resources.Search,
-		} {
-			if err := c.budget.Configure(resource, limit.Limit, time.Unix(limit.Reset, 0), now); err != nil {
-				return RateLimits{}, fmt.Errorf("configure Hyper API budget: %w", err)
-			}
-		}
-	}
-
 	limits := RateLimits{
 		Core:    restResponse.Resources.Core.Resource(),
 		GraphQL: restResponse.Resources.GraphQL.Resource(),
@@ -142,7 +118,7 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 
 func (c *Client) RefreshPullRequests(ctx context.Context) (FeedRefreshResult, error) {
 	now := time.Now()
-	items, warning, err := c.searchFirstPage(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests, now)
+	items, warning, err := c.searchFirstPage(ctx, model.FeedMyPullRequests, now)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
@@ -816,10 +792,6 @@ func (c *Client) doWithHeaders(ctx context.Context, method, endpoint, contentTyp
 }
 
 func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType string, bodyBytes []byte) ([]byte, http.Header, error) {
-	reservation, err := c.reserveRequest(ctx, endpoint, bodyBytes)
-	if err != nil {
-		return nil, nil, err
-	}
 	var body io.Reader
 	if bodyBytes != nil {
 		body = bytes.NewReader(bodyBytes)
@@ -853,72 +825,7 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType strin
 			code:     resp.StatusCode,
 		}
 	}
-	if c.budget != nil && reservation.Cost > 0 && reservation.Resource == quota.ResourceGraphQL {
-		var metering struct {
-			Data struct {
-				RateLimit struct {
-					Cost int `json:"cost"`
-				} `json:"rateLimit"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(raw, &metering) == nil && metering.Data.RateLimit.Cost > 0 {
-			if err := c.budget.Reconcile(reservation, metering.Data.RateLimit.Cost); err != nil {
-				return nil, resp.Header, fmt.Errorf("reconcile Hyper API usage: %w", err)
-			}
-		}
-	}
 	return raw, resp.Header, nil
-}
-
-func (c *Client) reserveRequest(ctx context.Context, endpoint string, body []byte) (quota.Reservation, error) {
-	if c.budget == nil || strings.HasSuffix(endpoint, "/rate_limit") {
-		return quota.Reservation{}, nil
-	}
-	resource := quota.ResourceCore
-	cost := 1
-	if strings.HasSuffix(endpoint, "/graphql") {
-		resource = quota.ResourceGraphQL
-		var err error
-		cost, err = graphQLReservationCost(body)
-		if err != nil {
-			return quota.Reservation{}, err
-		}
-	}
-	now := time.Now()
-	minimumRemaining := 0
-	if resource == quota.ResourceGraphQL && ctx.Value(pullRequestPriorityKey{}) != true {
-		state := c.budget.Status(now)
-		resetAt := state.Resources[quota.ResourceGraphQL].ResetAt
-		if resetAt.IsZero() {
-			resetAt = now.Add(time.Hour)
-		}
-		if remaining := resetAt.Sub(now); remaining > 0 {
-			minimumRemaining = int((remaining + fastPullRequestPoll - 1) / fastPullRequestPoll)
-		}
-	}
-	reservation, err := c.budget.ReserveKeeping(resource, cost, minimumRemaining, now)
-	if err != nil {
-		return quota.Reservation{}, err
-	}
-	return reservation, nil
-}
-
-func graphQLReservationCost(body []byte) (int, error) {
-	query := string(body)
-	switch {
-	case strings.Contains(query, "HyperAuthoredSearch"):
-		// One search connection requesting at most 100 nodes costs at most one point.
-		return 1, nil
-	case strings.Contains(query, "HyperSearch"):
-		// One search connection plus at most three nested connections for each
-		// of 100 results costs three points; keep two points of safety margin.
-		return 5, nil
-	case strings.Contains(query, "HyperNodes"):
-		// At most three nested connections for each of 100 nodes costs three points.
-		return 3, nil
-	default:
-		return 0, errors.New("GraphQL document has no API cost upper bound")
-	}
 }
 
 type statusError struct {

@@ -285,7 +285,7 @@ func TestRefreshErrorPreservesCachedFeed(t *testing.T) {
 	}
 	m := New(&refreshServiceStub{}, store, "github.com")
 
-	updatedModel, _ := m.Update(feedRefreshMsg{kind: refreshPullRequests, err: errors.New("budget exhausted")})
+	updatedModel, _ := m.Update(feedRefreshMsg{kind: refreshPullRequests, err: errors.New("GitHub unavailable")})
 	updated, ok := updatedModel.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want Model", updatedModel)

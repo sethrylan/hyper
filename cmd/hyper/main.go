@@ -16,7 +16,6 @@ import (
 	"github.com/sethrylan/hyper/internal/cache"
 	"github.com/sethrylan/hyper/internal/demo"
 	"github.com/sethrylan/hyper/internal/github"
-	"github.com/sethrylan/hyper/internal/quota"
 	"github.com/sethrylan/hyper/internal/tui"
 )
 
@@ -67,29 +66,24 @@ func run() error {
 		return fmt.Errorf("open cache: %w", err)
 	}
 
-	budget, err := quota.OpenDefault(authContext.Host, authContext.Account)
-	if err != nil {
-		return fmt.Errorf("open API usage ledger: %w", err)
-	}
-	defer func() { _ = budget.Close() }()
-	client := github.NewBudgetedClient(authContext.Host, authContext.Token, budget)
+	client := github.NewClient(authContext.Host, authContext.Token)
 	verifyContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	verifyErr := client.VerifyAccount(verifyContext, authContext.Account)
 	cancel()
 	if verifyErr != nil {
 		return fmt.Errorf("verify GitHub CLI active account: %w", verifyErr)
 	}
-	if updater := releaseUpdater(authContext.Token, budget); updater != nil {
+	if updater := releaseUpdater(authContext.Token); updater != nil {
 		return runProgram(tui.NewWithUpdater(client, store, authContext.Host, updater))
 	}
 	return runProgram(tui.New(client, store, authContext.Host))
 }
 
-func releaseUpdater(token string, budget *quota.Manager) *autoupdate.Service {
+func releaseUpdater(token string) *autoupdate.Service {
 	if !buildinfo.IsRelease() || os.Getenv("HYPER_NO_UPDATE") == "1" {
 		return nil
 	}
-	updater, err := autoupdate.NewBudgeted(token, buildinfo.Version(), budget)
+	updater, err := autoupdate.New(token, buildinfo.Version())
 	if err != nil {
 		return nil
 	}
