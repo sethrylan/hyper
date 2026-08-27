@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/cache"
-	"github.com/sethrylan/hyper/internal/github"
 	"github.com/sethrylan/hyper/internal/model"
 )
 
@@ -17,9 +16,9 @@ func TestCacheStatus(t *testing.T) {
 	}
 
 	data := cache.Data{
-		FeedItemIDs: map[model.Feed][]string{
-			model.FeedImportantNotifications: {"one", "two"},
-			model.FeedMyIssues:               {"three"},
+		Feeds: map[model.Feed]cache.FeedData{
+			model.FeedImportantNotifications: {Items: []model.Item{{Key: "one"}, {Key: "two"}}},
+			model.FeedMyIssues:               {Items: []model.Item{{Key: "three"}}},
 		},
 	}
 	if got := cacheStatus(data); got != "cache ready (3 items)" {
@@ -39,24 +38,17 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
-func TestRenderStatusIncludesRefreshProgress(t *testing.T) {
+func TestRenderStatusIncludesGenericRefreshProgress(t *testing.T) {
 	m := Model{
-		account:   "me",
-		host:      "github.com",
-		loading:   true,
-		loadingAt: time.Now().Add(-75 * time.Second),
-		refreshProgress: github.RefreshProgress{
-			DetailStep:  3,
-			DetailTotal: 7,
-			Phase:       "supplemental searches",
-			Step:        7,
-			Total:       7,
-		},
+		account:             "me",
+		host:                "github.com",
+		pullRequestsLoading: true,
+		pullRequestsStart:   time.Now().Add(-75 * time.Second),
 	}
 
 	status := m.renderStatus()
-	if !strings.Contains(status, "refreshing 7/7: supplemental searches 3/7") {
-		t.Fatalf("renderStatus() = %q, want progress text", status)
+	if !strings.Contains(status, "refreshing from GitHub") {
+		t.Fatalf("renderStatus() = %q, want generic refresh text", status)
 	}
 	if !strings.Contains(status, "1m15s") {
 		t.Fatalf("renderStatus() = %q, want elapsed duration", status)

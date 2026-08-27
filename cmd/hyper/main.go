@@ -65,7 +65,10 @@ func run() error {
 		return fmt.Errorf("open cache: %w", err)
 	}
 
-	budget := quota.NewManager(store, ctx.Host, store.Data().Account)
+	budget, err := quota.OpenDefault(ctx.Host, store.Data().Account)
+	if err != nil {
+		return fmt.Errorf("open API usage ledger: %w", err)
+	}
 	client := github.NewBudgetedClient(ctx.Host, ctx.Token, budget)
 	if updater := releaseUpdater(ctx.Token, budget); updater != nil {
 		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))

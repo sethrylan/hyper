@@ -61,7 +61,7 @@ func TestUpdateIgnoresCheckFailure(t *testing.T) {
 }
 
 func TestUpdateReservesWorstCaseCoreUsage(t *testing.T) {
-	budget := quota.NewManager(nil, "github.com", "me")
+	budget := quota.NewManager("github.com", "me")
 	service := &Service{
 		backend:        &backendStub{},
 		budget:         budget,

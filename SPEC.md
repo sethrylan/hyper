@@ -97,11 +97,10 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
 - Cadence:
   - Refresh My Pull Requests approximately every 5 seconds with a lightweight, feed-specific GraphQL search.
   - Refresh REST notifications incrementally approximately every 15 seconds, adding or updating Important items without removing cached items.
-  - Refresh My Issues and cached pull request metadata approximately every 60 seconds.
-  - Reconcile Important Notifications authoritatively approximately every 10 minutes so stale items are removed.
-- Run feed refreshes independently and apply each successful result immediately. A slow notification refresh must not delay My Pull Requests.
+  - Refresh My Issues and reconcile Important Notifications authoritatively approximately every 10 minutes. This refresh also updates rich Important-item metadata and removes stale items.
+- Run two independent refresh lanes and apply each successful result immediately. A slow background refresh must not delay My Pull Requests, and background results must not replace the pull request feed.
 - Keep a local cache so the app can render recent results quickly on startup.
-- Persist separate successful-refresh timestamps for each feed so a fast pull request refresh cannot advance the incremental notification cursor.
+- Store each feed and its successful-refresh timestamp independently so a fast pull request refresh cannot advance the incremental notification cursor or overwrite richer Important-item data.
 - Keep Hyper's own API usage strictly below 25% of every GitHub primary rate-limit window. With 5,000-point core and GraphQL limits, Hyper may use at most 1,249 requests or points per window; with a 30-request search limit, it may use at most 7.
 - Persist API usage reservations before sending requests, reconcile GraphQL reservations against `rateLimit.cost`, and retain enough GraphQL capacity for the five-second pull request cadence before admitting lower-priority work.
 - On rate-limit pressure:
@@ -111,6 +110,7 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
 - Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted, and show Hyper's persisted budget usage separately from account-wide usage.
+- `r` refreshes the pull request lane from My Pull Requests and runs the authoritative background lane from Important Notifications or My Issues.
 
 ## Cache and local state
 
@@ -118,11 +118,12 @@ Use simple local storage under the user cache/config directory. Prefer XDG-compa
 
 Cache:
 
-- Normalized item payloads needed to render the three feeds.
-- Per-feed fetched item IDs.
+- Independent item payloads for each of the three feeds.
+- A successful-refresh timestamp for each feed.
 - Local done state.
-- Last successful refresh metadata.
 - Current authenticated account and host metadata.
+
+Persist Hyper's API usage ledger separately from the feed cache so each API reservation does not rewrite cached items.
 
 Local state identity must include host or full URL, not only GitHub node ID, so future host/account support does not collide with existing cache data.
 

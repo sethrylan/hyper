@@ -36,7 +36,7 @@ func TestInitStartsBackgroundUpdate(t *testing.T) {
 	if !ok {
 		t.Fatalf("Init message type = %T, want tea.BatchMsg", m.Init()())
 	}
-	if len(batch) != 14 {
+	if len(batch) != 8 {
 		t.Fatalf("Init command count = %d, want refresh scheduling plus update", len(batch))
 	}
 }

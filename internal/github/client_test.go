@@ -17,14 +17,6 @@ import (
 	"github.com/sethrylan/hyper/internal/quota"
 )
 
-type quotaStoreStub struct{ state quota.State }
-
-func (s *quotaStoreStub) QuotaState() quota.State { return s.state }
-func (s *quotaStoreStub) SaveQuotaState(state quota.State) error {
-	s.state = state
-	return nil
-}
-
 func TestRateLimitsUsesRESTOnly(t *testing.T) {
 	var calls int
 	client := NewClient("github.com", "token")
@@ -50,8 +42,7 @@ func TestRateLimitsUsesRESTOnly(t *testing.T) {
 
 func TestRateLimitsIncludesHyperBudget(t *testing.T) {
 	now := time.Now()
-	store := &quotaStoreStub{}
-	budget := quota.NewManager(store, "github.com", "me")
+	budget := quota.NewManager("github.com", "me")
 	client := NewBudgetedClient("github.com", "token", budget)
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return jsonResponse(fmt.Sprintf(`{"resources":{"core":{"limit":5000,"used":10,"remaining":4990,"reset":%d},"graphql":{"limit":5000,"used":20,"remaining":4980,"reset":%d},"search":{"limit":30,"used":0,"remaining":30,"reset":%d}}}`, now.Add(time.Hour).Unix(), now.Add(time.Hour).Unix(), now.Add(time.Minute).Unix())), nil
@@ -67,8 +58,7 @@ func TestRateLimitsIncludesHyperBudget(t *testing.T) {
 }
 
 func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
-	store := &quotaStoreStub{}
-	budget := quota.NewManager(store, "github.com", "me")
+	budget := quota.NewManager("github.com", "me")
 	client := NewBudgetedClient("github.com", "token", budget)
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(req.Body)
@@ -95,8 +85,7 @@ func TestBudgetedAuthoredSearchReconcilesActualCost(t *testing.T) {
 
 func TestBudgetExhaustionStopsRequestBeforeDispatch(t *testing.T) {
 	now := time.Now()
-	store := &quotaStoreStub{}
-	budget := quota.NewManager(store, "github.com", "me")
+	budget := quota.NewManager("github.com", "me")
 	if err := budget.Configure(quota.ResourceGraphQL, 20, now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +308,7 @@ func TestNotificationPaginationUsesFiftyItemPagesAndSince(t *testing.T) {
 		return notificationPage(1), nil
 	})}
 
-	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC), 1, 2, 2)
+	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +328,7 @@ func TestNotificationPaginationStopsAtCap(t *testing.T) {
 		return notificationPage(50), nil
 	})}
 
-	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Time{}, 1, 2, 2)
+	items, _, err := client.fetchRESTNotificationItems(t.Context(), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +337,7 @@ func TestNotificationPaginationStopsAtCap(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testing.T) {
+func TestRefreshNotificationsIsAdditive(t *testing.T) {
 	updated := time.Date(2026, 8, 7, 15, 4, 0, 0, time.UTC)
 	existing := model.Item{
 		Host:        "github.com",
@@ -375,15 +364,6 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 			}), nil
 		case "/repos/owner/repo/pulls/1":
 			return jsonValueResponse(restSubjectDetail{HTMLURL: "https://github.com/owner/repo/pull/1", NodeID: "PR_1", UpdatedAt: updated}), nil
-		case "/graphql":
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(string(body), "HyperAuthoredSearch") {
-				return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[]},"rateLimit":{"remaining":4999}}}`), nil
-			}
-			return jsonResponse(`{"data":{"nodes":[{"__typename":"PullRequest","id":"PR_1","title":"latest title","updatedAt":"2026-08-07T15:04:00Z","isDraft":false,"merged":true,"state":"MERGED"}],"rateLimit":{"remaining":4999}}}`), nil
 		default:
 			t.Fatalf("unexpected request path %q", req.URL.Path)
 			return nil, nil
@@ -391,15 +371,14 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 	})}
 
 	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
-		Account:            "me",
-		Existing:           []model.Item{existing, retained},
-		PullRequestNodeIDs: []string{"PR_1"},
-		Since:              time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
+		Account:  "me",
+		Existing: []model.Item{existing, retained},
+		Since:    time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	notifications := result.Feeds[model.FeedImportantNotifications]
+	notifications := result.Items
 	if len(notifications) != 3 {
 		t.Fatalf("items = %d, want updated, retained, and new mention", len(notifications))
 	}
@@ -408,42 +387,6 @@ func TestRefreshNotificationsIsAdditiveAndRefreshesPullRequestMetadata(t *testin
 	}
 	if notifications[1].Key != retained.Key {
 		t.Fatalf("retained item = %#v, want existing item preserved", notifications[1])
-	}
-	if len(result.PullRequests) != 1 {
-		t.Fatalf("pull request metadata = %#v, want one update", result.PullRequests)
-	}
-	metadata := result.PullRequests[0]
-	if metadata.NodeID != "PR_1" || metadata.Title != "latest title" || metadata.State != "MERGED" || !metadata.Merged {
-		t.Fatalf("pull request metadata = %#v, want latest title and merged state", metadata)
-	}
-}
-
-func TestPullRequestMetadataRefreshDeduplicatesAndBatchesNodeIDs(t *testing.T) {
-	var requests [][]string
-	client := NewClient("github.com", "token")
-	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		var body struct {
-			Variables struct {
-				IDs []string `json:"ids"`
-			} `json:"variables"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		requests = append(requests, body.Variables.IDs)
-		return jsonResponse(`{"data":{"nodes":[],"rateLimit":{"remaining":4999}}}`), nil
-	})}
-
-	ids := make([]string, 0, 103)
-	for i := range 101 {
-		ids = append(ids, fmt.Sprintf("PR_%d", i))
-	}
-	ids = append(ids, "", "PR_0")
-	if _, _, err := client.fetchPullRequestMetadata(t.Context(), ids); err != nil {
-		t.Fatal(err)
-	}
-	if len(requests) != 2 || len(requests[0]) != 100 || len(requests[1]) != 1 {
-		t.Fatalf("metadata request batches = %#v, want 100 and 1 unique node IDs", requests)
 	}
 }
 
@@ -503,8 +446,8 @@ func TestSupplementalMentionsAreAnnotated(t *testing.T) {
 	}
 }
 
-func TestRefreshFetchesFeedsInParallel(t *testing.T) {
-	started := make(chan string, 3)
+func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
+	started := make(chan string, 2)
 	release := make(chan struct{})
 	client := NewClient("github.com", "token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -518,12 +461,6 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 		}
 
 		switch {
-		case req.URL.Path == "/graphql" && strings.Contains(body, "HyperViewer"):
-			return jsonResponse(`{"data":{"viewer":{"login":"me"},"rateLimit":{"remaining":500}}}`), nil
-		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:pr"):
-			started <- "pull requests"
-			<-release
-			return emptySearchResponse(), nil
 		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:issue"):
 			started <- "issues"
 			<-release
@@ -541,12 +478,12 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.Refresh(t.Context())
+		_, err := client.RefreshBackground(t.Context(), "me")
 		done <- err
 	}()
 
 	seen := map[string]bool{}
-	for range 3 {
+	for range 2 {
 		select {
 		case feed := <-started:
 			seen[feed] = true
@@ -557,7 +494,7 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 
 	select {
 	case err := <-done:
-		t.Fatalf("Refresh completed before all feed refreshes started: %v", err)
+		t.Fatalf("RefreshBackground completed before both feeds started: %v", err)
 	default:
 	}
 
@@ -569,10 +506,10 @@ func TestRefreshFetchesFeedsInParallel(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for Refresh to complete")
+		t.Fatal("timed out waiting for RefreshBackground to complete")
 	}
 
-	for _, feed := range []string{"pull requests", "issues", "notifications"} {
+	for _, feed := range []string{"issues", "notifications"} {
 		if !seen[feed] {
 			t.Fatalf("feed %q was not refreshed in parallel; started feeds = %#v", feed, seen)
 		}
@@ -584,19 +521,6 @@ func TestMergeItemPreservesSupplementalMentionReason(t *testing.T) {
 	incoming := model.Item{Key: "one", NotificationReason: "MENTION"}
 	if got := mergeItem(base, incoming).NotificationReason; got != "MENTION" {
 		t.Fatalf("NotificationReason = %q, want MENTION", got)
-	}
-}
-
-func TestRefreshProgressString(t *testing.T) {
-	progress := RefreshProgress{
-		DetailStep:  3,
-		DetailTotal: 7,
-		Phase:       "supplemental searches",
-		Step:        7,
-		Total:       7,
-	}
-	if got := progress.String(); got != "7/7: supplemental searches 3/7" {
-		t.Fatalf("RefreshProgress.String() = %q, want progress text", got)
 	}
 }
 
@@ -661,55 +585,4 @@ func containsFoldForTest(values []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-func TestRefreshNotificationsDiscoversNewlyAuthoredItems(t *testing.T) {
-	var searchQueries []string
-	client := NewClient("github.com", "token")
-	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.Path {
-		case "/notifications":
-			return jsonValueResponse([]restNotification{}), nil
-		case "/graphql":
-			var body struct {
-				Query     string `json:"query"`
-				Variables struct {
-					Query string `json:"query"`
-				} `json:"variables"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(body.Query, "HyperAuthoredSearch") {
-				return jsonResponse(`{"data":{"nodes":[],"rateLimit":{"remaining":4999}}}`), nil
-			}
-			searchQueries = append(searchQueries, body.Variables.Query)
-			if strings.Contains(body.Variables.Query, "is:pr") {
-				return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"PullRequest","id":"PR_new","title":"just opened","url":"https://github.com/owner/repo/pull/9","state":"OPEN","author":{"login":"me"},"repository":{"name":"repo","owner":{"login":"owner"}}}]},"rateLimit":{"remaining":4998}}}`), nil
-			}
-			return jsonResponse(`{"data":{"search":{"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"Issue","id":"I_new","title":"fresh issue","url":"https://github.com/owner/repo/issues/3","state":"OPEN","author":{"login":"me"},"repository":{"name":"repo","owner":{"login":"owner"}}}]},"rateLimit":{"remaining":4997}}}`), nil
-		default:
-			t.Fatalf("unexpected request path %q", req.URL.Path)
-			return nil, nil
-		}
-	})}
-
-	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
-		Account: "me",
-		Since:   time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pullRequests := result.Feeds[model.FeedMyPullRequests]
-	if len(pullRequests) != 1 || pullRequests[0].NodeID != "PR_new" || pullRequests[0].Title != "just opened" {
-		t.Fatalf("my pull requests = %#v, want the newly authored pull request", pullRequests)
-	}
-	issues := result.Feeds[model.FeedMyIssues]
-	if len(issues) != 1 || issues[0].NodeID != "I_new" {
-		t.Fatalf("my issues = %#v, want the newly authored issue", issues)
-	}
-	if len(searchQueries) != 2 {
-		t.Fatalf("search queries = %#v, want one pull request and one issue search", searchQueries)
-	}
 }

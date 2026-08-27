@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/sethrylan/hyper/internal/jsonfile"
 )
 
 const budgetDivisor = 4
@@ -31,11 +35,6 @@ type State struct {
 	Account   string              `json:"account,omitempty"`
 	Host      string              `json:"host,omitempty"`
 	Resources map[Resource]Window `json:"resources,omitempty"`
-}
-
-type Store interface {
-	QuotaState() State
-	SaveQuotaState(state State) error
 }
 
 type Reservation struct {
@@ -61,15 +60,31 @@ func (e ExhaustedError) Error() string {
 
 type Manager struct {
 	mu    sync.Mutex
+	path  string
 	state State
-	store Store
 }
 
-func NewManager(store Store, host, account string) *Manager {
-	state := State{}
-	if store != nil {
-		state = cloneState(store.QuotaState())
+func NewManager(host, account string) *Manager {
+	return newManager("", State{}, host, account)
+}
+
+func OpenDefault(host, account string) (*Manager, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve user home dir: %w", err)
 	}
+	return Open(filepath.Join(home, ".hyper", "api-usage.json"), host, account)
+}
+
+func Open(path, host, account string) (*Manager, error) {
+	var state State
+	if _, err := jsonfile.Read(path, &state); err != nil {
+		return nil, fmt.Errorf("read API usage: %w", err)
+	}
+	return newManager(path, state, host, account), nil
+}
+
+func newManager(path string, state State, host, account string) *Manager {
 	ensureResources(&state)
 	if state.Host != "" && state.Host != host || state.Account != "" && account != "" && state.Account != account {
 		state = State{}
@@ -79,7 +94,7 @@ func NewManager(store Store, host, account string) *Manager {
 	if account != "" {
 		state.Account = account
 	}
-	return &Manager{state: state, store: store}
+	return &Manager{path: path, state: state}
 }
 
 func (m *Manager) SetIdentity(host, account string) error {
@@ -197,10 +212,13 @@ func (m *Manager) resetExpiredLocked(now time.Time) {
 }
 
 func (m *Manager) saveLocked() error {
-	if m.store == nil {
+	if m.path == "" {
 		return nil
 	}
-	return m.store.SaveQuotaState(cloneState(m.state))
+	if err := jsonfile.Write(m.path, m.state); err != nil {
+		return fmt.Errorf("save API usage: %w", err)
+	}
+	return nil
 }
 
 func ensureResources(state *State) {

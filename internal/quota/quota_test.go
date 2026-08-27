@@ -3,17 +3,10 @@ package quota
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
-
-type stateStore struct{ state State }
-
-func (s *stateStore) QuotaState() State { return s.state }
-func (s *stateStore) SaveQuotaState(state State) error {
-	s.state = state
-	return nil
-}
 
 func TestBudgetLimitIsStrictlyBelowTwentyFivePercent(t *testing.T) {
 	if got := BudgetLimit(5000); got != 1249 {
@@ -24,10 +17,25 @@ func TestBudgetLimitIsStrictlyBelowTwentyFivePercent(t *testing.T) {
 	}
 }
 
+func TestOpenDefaultUsesSeparateUsageFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	manager, err := OpenDefault("github.com", "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".hyper", "api-usage.json"); manager.path != want {
+		t.Fatalf("usage path = %q, want %q", manager.path, want)
+	}
+}
+
 func TestReservationsPersistAndStopAtLimit(t *testing.T) {
 	now := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
-	store := &stateStore{}
-	manager := NewManager(store, "github.com", "me")
+	path := filepath.Join(t.TempDir(), "api-usage.json")
+	manager, openErr := Open(path, "github.com", "me")
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
 	if err := manager.Configure(ResourceGraphQL, 20, now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +52,10 @@ func TestReservationsPersistAndStopAtLimit(t *testing.T) {
 			t.Fatalf("error = %T, want ExhaustedError", err)
 		}
 	}
-	reloaded := NewManager(store, "github.com", "me")
+	reloaded, err := Open(path, "github.com", "me")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := reloaded.Status(now).Resources[ResourceGraphQL].Used; got != 4 {
 		t.Fatalf("persisted usage = %d, want 4", got)
 	}
@@ -52,7 +63,7 @@ func TestReservationsPersistAndStopAtLimit(t *testing.T) {
 
 func TestReconcileReleasesConservativeReservation(t *testing.T) {
 	now := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
-	manager := NewManager(nil, "github.com", "me")
+	manager := NewManager("github.com", "me")
 	reservation, err := manager.Reserve(ResourceGraphQL, 5, now)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +78,7 @@ func TestReconcileReleasesConservativeReservation(t *testing.T) {
 
 func TestReserveKeepingProtectsHigherPriorityCapacity(t *testing.T) {
 	now := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
-	manager := NewManager(nil, "github.com", "me")
+	manager := NewManager("github.com", "me")
 	if err := manager.Configure(ResourceGraphQL, 20, now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
@@ -81,14 +92,18 @@ func TestReserveKeepingProtectsHigherPriorityCapacity(t *testing.T) {
 
 func TestExpiredWindowResetsUsage(t *testing.T) {
 	now := time.Date(2026, 8, 27, 14, 0, 0, 0, time.UTC)
-	store := &stateStore{state: State{
+	path := filepath.Join(t.TempDir(), "api-usage.json")
+	manager, openErr := Open(path, "github.com", "me")
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	manager.state = State{
 		Account: "me",
 		Host:    "github.com",
 		Resources: map[Resource]Window{
 			ResourceGraphQL: {Limit: 5000, ResetAt: now.Add(-time.Second), Used: 1249},
 		},
-	}}
-	manager := NewManager(store, "github.com", "me")
+	}
 	if _, err := manager.Reserve(ResourceGraphQL, 1, now); err != nil {
 		t.Fatal(err)
 	}

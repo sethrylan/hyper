@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/sethrylan/hyper/internal/filter"
@@ -30,26 +29,7 @@ const (
 	fastPullRequestPoll  = 5 * time.Second
 
 	notificationReasonMention = "MENTION"
-	phaseIssues               = "issues"
-	phaseNotifications        = "notifications"
-	phasePullRequests         = "pull requests"
-	phaseSupplementalSearches = "supplemental searches"
 )
-
-// quickRefreshSteps counts the progress steps in RefreshNotifications:
-// notification list, notification details, my pull requests, my issues, and
-// pull request metadata.
-const quickRefreshSteps = 5
-
-// authoredFeeds are the feeds built from an author:@me search rather than from
-// the notification list.
-var authoredFeeds = []struct {
-	feed  model.Feed
-	phase string
-}{
-	{feed: model.FeedMyPullRequests, phase: phasePullRequests},
-	{feed: model.FeedMyIssues, phase: phaseIssues},
-}
 
 var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
@@ -57,20 +37,10 @@ type pullRequestPriorityKey struct{}
 
 type Client struct {
 	budget     *quota.Manager
-	progress   atomic.Value
 	host       string
 	httpClient *http.Client
 	retrySleep func(context.Context, time.Duration) error
 	token      string
-}
-
-type RefreshProgress struct {
-	Detail      string
-	DetailStep  int
-	DetailTotal int
-	Phase       string
-	Step        int
-	Total       int
 }
 
 type RefreshResult struct {
@@ -88,34 +58,10 @@ type FeedRefreshResult struct {
 	RefreshedAt time.Time
 }
 
-type PullRequestMetadataResult struct {
-	PullRequests []PullRequestMetadata
-	RateWarning  string
-	RefreshedAt  time.Time
-}
-
 type NotificationRefreshRequest struct {
-	Account            string
-	Existing           []model.Item
-	PullRequestNodeIDs []string
-	Since              time.Time
-}
-
-type NotificationRefreshResult struct {
-	Account      string
-	Feeds        map[model.Feed][]model.Item
-	PullRequests []PullRequestMetadata
-	RateWarning  string
-	RefreshedAt  time.Time
-}
-
-type PullRequestMetadata struct {
-	Draft     bool
-	Merged    bool
-	NodeID    string
-	State     string
-	Title     string
-	UpdatedAt time.Time
+	Account  string
+	Existing []model.Item
+	Since    time.Time
 }
 
 type RateLimits struct {
@@ -214,29 +160,21 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 }
 
 func (c *Client) RefreshPullRequests(ctx context.Context) (FeedRefreshResult, error) {
-	return c.refreshAuthoredFeed(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests)
-}
-
-func (c *Client) RefreshIssues(ctx context.Context) (FeedRefreshResult, error) {
-	return c.refreshAuthoredFeed(ctx, model.FeedMyIssues)
-}
-
-func (c *Client) refreshAuthoredFeed(ctx context.Context, feed model.Feed) (FeedRefreshResult, error) {
 	now := time.Now()
-	items, warning, err := c.search(ctx, feed, now)
+	items, warning, err := c.search(context.WithValue(ctx, pullRequestPriorityKey{}, true), model.FeedMyPullRequests, now)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
-	return FeedRefreshResult{Feed: feed, Items: items, RateWarning: warning, RefreshedAt: now}, nil
+	return FeedRefreshResult{Feed: model.FeedMyPullRequests, Items: items, RateWarning: warning, RefreshedAt: now}, nil
 }
 
-func (c *Client) RefreshIncrementalNotifications(ctx context.Context, request NotificationRefreshRequest) (FeedRefreshResult, error) {
+func (c *Client) RefreshNotifications(ctx context.Context, request NotificationRefreshRequest) (FeedRefreshResult, error) {
 	now := time.Now()
 	account, warning, err := c.resolveAccount(ctx, request.Account)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
-	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, 2)
+	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
@@ -247,34 +185,6 @@ func (c *Client) RefreshIncrementalNotifications(ctx context.Context, request No
 		RateWarning: joinWarning(warning, notificationWarning),
 		RefreshedAt: now,
 	}, nil
-}
-
-func (c *Client) RefreshImportant(ctx context.Context, _ string) (FeedRefreshResult, error) {
-	now := time.Now()
-	verifiedAccount, warning, err := c.resolveAccount(ctx, "")
-	if err != nil {
-		return FeedRefreshResult{}, err
-	}
-	items, refreshWarning, err := c.fetchNotifications(ctx, verifiedAccount)
-	if err != nil {
-		return FeedRefreshResult{}, err
-	}
-	return FeedRefreshResult{
-		Account:     verifiedAccount,
-		Feed:        model.FeedImportantNotifications,
-		Items:       items,
-		RateWarning: joinWarning(warning, refreshWarning),
-		RefreshedAt: now,
-	}, nil
-}
-
-func (c *Client) RefreshPullRequestMetadata(ctx context.Context, nodeIDs []string) (PullRequestMetadataResult, error) {
-	now := time.Now()
-	pullRequests, warning, err := c.fetchPullRequestMetadata(ctx, nodeIDs)
-	if err != nil {
-		return PullRequestMetadataResult{PullRequests: pullRequests, RateWarning: warning, RefreshedAt: now}, err
-	}
-	return PullRequestMetadataResult{PullRequests: pullRequests, RateWarning: warning, RefreshedAt: now}, nil
 }
 
 func (c *Client) resolveAccount(ctx context.Context, account string) (string, string, error) {
@@ -301,72 +211,9 @@ func (c *Client) resolveAccount(ctx context.Context, account string) (string, st
 	return response.Login, rateWarning(remaining), nil
 }
 
-func (c *Client) RefreshNotifications(ctx context.Context, request NotificationRefreshRequest) (NotificationRefreshResult, error) {
+func (c *Client) RefreshBackground(ctx context.Context, account string) (RefreshResult, error) {
 	now := time.Now()
-	account := request.Account
-	var warning string
-	if account == "" {
-		var response struct {
-			Login string `json:"login"`
-		}
-		remaining, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
-		if err != nil {
-			return NotificationRefreshResult{}, fmt.Errorf("fetch authenticated user: %w", err)
-		}
-		account = response.Login
-		warning = rateWarning(remaining)
-	}
-
-	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since, 1, 2, quickRefreshSteps)
-	if err != nil {
-		return NotificationRefreshResult{}, err
-	}
-	warning = joinWarning(warning, notificationWarning)
-
-	feeds, searchWarning, err := c.searchAuthoredFeeds(ctx, now)
-	warning = joinWarning(warning, searchWarning)
-	if err != nil {
-		return NotificationRefreshResult{}, err
-	}
-	feeds[model.FeedImportantNotifications] = mergeShortImportantItems(request.Existing, items, account)
-
-	pullRequests, metadataWarning, metadataErr := c.fetchPullRequestMetadata(ctx, request.PullRequestNodeIDs)
-	warning = joinWarning(warning, metadataWarning)
-	if metadataErr != nil {
-		warning = joinWarning(warning, "pull request metadata refresh failed: "+metadataErr.Error())
-	}
-
-	return NotificationRefreshResult{
-		Account:      account,
-		Feeds:        feeds,
-		PullRequests: pullRequests,
-		RateWarning:  warning,
-		RefreshedAt:  now,
-	}, nil
-}
-
-// searchAuthoredFeeds refreshes the feeds that only a search can discover, so
-// pull requests and issues the user just opened appear without waiting for the
-// authoritative refresh.
-func (c *Client) searchAuthoredFeeds(ctx context.Context, now time.Time) (map[model.Feed][]model.Item, string, error) {
-	feeds := make(map[model.Feed][]model.Item, len(authoredFeeds))
-	var warning string
-	for offset, authored := range authoredFeeds {
-		c.setProgress(RefreshProgress{Phase: authored.phase, Step: offset + 3, Total: quickRefreshSteps})
-		items, searchWarning, err := c.search(ctx, authored.feed, now)
-		warning = joinWarning(warning, searchWarning)
-		if err != nil {
-			return nil, warning, err
-		}
-		feeds[authored.feed] = items
-	}
-	return feeds, warning, nil
-}
-
-func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
-	now := time.Now()
-	c.setProgress(RefreshProgress{Phase: "account", Step: 1, Total: 7})
-	account, rateWarning, err := c.viewer(ctx)
+	verifiedAccount, rateWarning, err := c.resolveAccount(ctx, account)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -381,10 +228,9 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 		warning string
 	}
 
-	results := make(chan feedRefreshResult, 3)
-	startFeedRefresh := func(feed model.Feed, progress RefreshProgress, refresh func(context.Context) ([]model.Item, string, error)) {
+	results := make(chan feedRefreshResult, 2)
+	startFeedRefresh := func(feed model.Feed, refresh func(context.Context) ([]model.Item, string, error)) {
 		go func() {
-			c.setProgress(progress)
 			items, warning, err := refresh(refreshCtx)
 			if err != nil {
 				cancel()
@@ -398,19 +244,16 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 		}()
 	}
 
-	startFeedRefresh(model.FeedMyPullRequests, RefreshProgress{Phase: phasePullRequests, Step: 2, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
-		return c.search(ctx, model.FeedMyPullRequests, now)
-	})
-	startFeedRefresh(model.FeedMyIssues, RefreshProgress{Phase: phaseIssues, Step: 3, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
+	startFeedRefresh(model.FeedMyIssues, func(ctx context.Context) ([]model.Item, string, error) {
 		return c.search(ctx, model.FeedMyIssues, now)
 	})
-	startFeedRefresh(model.FeedImportantNotifications, RefreshProgress{Phase: phaseNotifications, Step: 4, Total: 7}, func(ctx context.Context) ([]model.Item, string, error) {
-		return c.fetchNotifications(ctx, account)
+	startFeedRefresh(model.FeedImportantNotifications, func(ctx context.Context) ([]model.Item, string, error) {
+		return c.fetchNotifications(ctx, verifiedAccount)
 	})
 
 	feeds := map[model.Feed][]model.Item{}
 	var firstErr error
-	for range 3 {
+	for range 2 {
 		result := <-results
 		if result.err != nil {
 			if firstErr == nil || errors.Is(firstErr, context.Canceled) {
@@ -426,76 +269,18 @@ func (c *Client) Refresh(ctx context.Context) (RefreshResult, error) {
 	}
 
 	return RefreshResult{
-		Account:     account,
+		Account:     verifiedAccount,
 		Feeds:       feeds,
 		RateWarning: rateWarning,
 		RefreshedAt: now,
 	}, nil
 }
 
-func (c *Client) CurrentProgress() RefreshProgress {
-	progress, ok := c.progress.Load().(RefreshProgress)
-	if !ok {
-		return RefreshProgress{}
-	}
-	return progress
-}
-
-func (c *Client) setProgress(progress RefreshProgress) {
-	c.progress.Store(progress)
-}
-
-func (p RefreshProgress) String() string {
-	if p.Phase == "" {
-		return ""
-	}
-	var b strings.Builder
-	if p.Total > 0 && p.Step > 0 {
-		b.WriteString(strconv.Itoa(p.Step))
-		b.WriteString("/")
-		b.WriteString(strconv.Itoa(p.Total))
-		b.WriteString(": ")
-	}
-	b.WriteString(p.Phase)
-	if p.Detail != "" {
-		b.WriteString(" ")
-		b.WriteString(p.Detail)
-	}
-	if p.DetailTotal > 0 && p.DetailStep > 0 {
-		b.WriteString(" ")
-		b.WriteString(strconv.Itoa(p.DetailStep))
-		b.WriteString("/")
-		b.WriteString(strconv.Itoa(p.DetailTotal))
-	} else if p.DetailStep > 0 {
-		b.WriteString(" ")
-		b.WriteString(strconv.Itoa(p.DetailStep))
-	}
-	return b.String()
-}
-
-func (c *Client) viewer(ctx context.Context) (string, string, error) {
-	var response struct {
-		Data struct {
-			RateLimit struct {
-				Remaining int `json:"remaining"`
-			} `json:"rateLimit"`
-			Viewer struct {
-				Login string `json:"login"`
-			} `json:"viewer"`
-		} `json:"data"`
-	}
-	if err := c.graphQL(ctx, `query HyperViewer { viewer { login } rateLimit { cost limit remaining resetAt } }`, nil, &response); err != nil {
-		return "", "", fmt.Errorf("fetch authenticated user: %w", err)
-	}
-	return response.Data.Viewer.Login, rateWarning(response.Data.RateLimit.Remaining), nil
-}
-
 func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Item, string, error) {
-	notificationItems, warning, err := c.fetchRESTNotificationItems(ctx, time.Time{}, 4, 5, 7)
+	notificationItems, warning, err := c.fetchRESTNotificationItems(ctx, time.Time{})
 	if err != nil {
 		return nil, warning, err
 	}
-	c.setProgress(RefreshProgress{Phase: "notification enrichment", Step: 6, Total: 7})
 	enrichedItems, enrichWarning, err := c.enrichItems(ctx, notificationItems)
 	if err != nil {
 		warning = joinWarning(warning, "notification subject enrichment failed: "+err.Error())
@@ -505,7 +290,6 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	}
 	items := importantItems(enrichedItems, me)
 
-	c.setProgress(RefreshProgress{Phase: phaseSupplementalSearches, Step: 7, Total: 7})
 	supplemental, supplementalWarning := c.fetchSupplementalImportantItems(ctx, me, time.Now())
 	warning = joinWarning(warning, supplementalWarning)
 	items = mergeItems(items, importantItems(supplemental, me))
@@ -515,11 +299,10 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	return items, warning, nil
 }
 
-func (c *Client) fetchRESTNotificationItems(ctx context.Context, since time.Time, listStep, detailStep, total int) ([]model.Item, string, error) {
+func (c *Client) fetchRESTNotificationItems(ctx context.Context, since time.Time) ([]model.Item, string, error) {
 	notifications := make([]restNotification, 0, maxNotifications)
 	var warning string
 	for page := 1; len(notifications) < maxNotifications; page++ {
-		c.setProgress(RefreshProgress{Detail: "page", DetailStep: page, Phase: phaseNotifications, Step: listStep, Total: total})
 		query := url.Values{
 			"all":      {"true"},
 			"page":     {strconv.Itoa(page)},
@@ -548,8 +331,7 @@ func (c *Client) fetchRESTNotificationItems(ctx context.Context, since time.Time
 		}
 	}
 	notificationItems := make([]model.Item, 0, len(notifications))
-	for index, notification := range notifications {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(notifications), Phase: "notification details", Step: detailStep, Total: total})
+	for _, notification := range notifications {
 		notificationItems = append(notificationItems, c.restNotificationItem(ctx, notification))
 	}
 	return notificationItems, warning, nil
@@ -650,7 +432,6 @@ func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[s
 	var warning string
 	for start := 0; start < len(ids); start += 100 {
 		end := min(start+100, len(ids))
-		c.setProgress(RefreshProgress{DetailStep: start/100 + 1, DetailTotal: (len(ids) + 99) / 100, Phase: "notification enrichment", Step: 6, Total: 7})
 		var response nodesResponse
 		if err := c.graphQL(ctx, nodesGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
 			return nil, warning, err
@@ -666,63 +447,11 @@ func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[s
 	return subjects, warning, nil
 }
 
-func (c *Client) fetchPullRequestMetadata(ctx context.Context, nodeIDs []string) ([]PullRequestMetadata, string, error) {
-	ids := uniqueStrings(nodeIDs)
-	metadata := make([]PullRequestMetadata, 0, len(ids))
-	var warning string
-	for start := 0; start < len(ids); start += 100 {
-		end := min(start+100, len(ids))
-		c.setProgress(RefreshProgress{
-			DetailStep:  start/100 + 1,
-			DetailTotal: (len(ids) + 99) / 100,
-			Phase:       "pull request metadata",
-			Step:        quickRefreshSteps,
-			Total:       quickRefreshSteps,
-		})
-		var response pullRequestMetadataResponse
-		if err := c.graphQL(ctx, pullRequestMetadataGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
-			return metadata, warning, err
-		}
-		warning = joinWarning(warning, rateWarning(response.Data.RateLimit.Remaining))
-		for _, node := range response.Data.Nodes {
-			if node == nil || node.TypeName != "PullRequest" || node.ID == "" {
-				continue
-			}
-			metadata = append(metadata, PullRequestMetadata{
-				Draft:     node.IsDraft,
-				Merged:    node.Merged,
-				NodeID:    node.ID,
-				State:     node.State,
-				Title:     node.Title,
-				UpdatedAt: node.UpdatedAt,
-			})
-		}
-	}
-	return metadata, warning, nil
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		unique = append(unique, value)
-	}
-	return unique
-}
-
 func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string, now time.Time) ([]model.Item, string) {
 	queries := supplementalImportantQueries(now)
 	var items []model.Item
 	var warning string
-	for index, source := range queries {
-		c.setProgress(RefreshProgress{DetailStep: index + 1, DetailTotal: len(queries), Phase: phaseSupplementalSearches, Step: 7, Total: 7})
+	for _, source := range queries {
 		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())
@@ -1173,8 +902,6 @@ func graphQLReservationCost(body []byte) int {
 		return 5
 	case strings.Contains(query, "HyperNodes"):
 		return 3
-	case strings.Contains(query, "HyperPullRequestMetadata"), strings.Contains(query, "HyperViewer"):
-		return 2
 	default:
 		return 5
 	}
@@ -1371,41 +1098,6 @@ type restSubjectDetail struct {
 	StateReason        string    `json:"state_reason"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	User               user      `json:"user"`
-}
-
-const pullRequestMetadataGraphQL = `
-query HyperPullRequestMetadata($ids: [ID!]!) {
-  nodes(ids: $ids) {
-    __typename
-    ... on PullRequest {
-      id
-      title
-      updatedAt
-      isDraft
-      merged
-      state
-    }
-  }
-  rateLimit { cost limit remaining resetAt }
-}`
-
-type pullRequestMetadataResponse struct {
-	Data struct {
-		Nodes     []*pullRequestMetadataNode `json:"nodes"`
-		RateLimit struct {
-			Remaining int `json:"remaining"`
-		} `json:"rateLimit"`
-	} `json:"data"`
-}
-
-type pullRequestMetadataNode struct {
-	TypeName  string    `json:"__typename"`
-	ID        string    `json:"id"`
-	IsDraft   bool      `json:"isDraft"`
-	Merged    bool      `json:"merged"`
-	State     string    `json:"state"`
-	Title     string    `json:"title"`
-	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 const nodesGraphQL = `
