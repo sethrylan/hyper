@@ -32,6 +32,7 @@ const (
 var errGraphQLRateLimitExhausted = errors.New("github graphql rate limit exhausted")
 
 type Client struct {
+	account    string
 	host       string
 	httpClient *http.Client
 	retrySleep func(context.Context, time.Duration) error
@@ -54,7 +55,6 @@ type FeedRefreshResult struct {
 }
 
 type NotificationRefreshRequest struct {
-	Account  string
 	Existing []model.Item
 	Since    time.Time
 }
@@ -122,59 +122,41 @@ func (c *Client) RefreshPullRequests(ctx context.Context) (FeedRefreshResult, er
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
-	return FeedRefreshResult{Feed: model.FeedMyPullRequests, Items: items, RateWarning: warning, RefreshedAt: now}, nil
+	return FeedRefreshResult{Account: c.account, Feed: model.FeedMyPullRequests, Items: items, RateWarning: warning, RefreshedAt: now}, nil
 }
 
 func (c *Client) RefreshNotifications(ctx context.Context, request NotificationRefreshRequest) (FeedRefreshResult, error) {
 	now := time.Now()
-	account, warning, err := c.resolveAccount(ctx, request.Account)
-	if err != nil {
-		return FeedRefreshResult{}, err
-	}
-	items, notificationWarning, err := c.fetchRESTNotificationItems(ctx, request.Since)
+	items, warning, err := c.fetchRESTNotificationItems(ctx, request.Since)
 	if err != nil {
 		return FeedRefreshResult{}, err
 	}
 	return FeedRefreshResult{
-		Account:     account,
+		Account:     c.account,
 		Feed:        model.FeedImportantNotifications,
-		Items:       mergeShortImportantItems(request.Existing, items, account),
-		RateWarning: joinWarning(warning, notificationWarning),
+		Items:       mergeShortImportantItems(request.Existing, items, c.account),
+		RateWarning: warning,
 		RefreshedAt: now,
 	}, nil
 }
 
 func (c *Client) VerifyAccount(ctx context.Context, expected string) error {
-	account, _, err := c.resolveAccount(ctx, "")
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(account, expected) {
-		return fmt.Errorf("authenticated token belongs to %q, but GitHub CLI active account is %q", account, expected)
-	}
-	return nil
-}
-
-func (c *Client) resolveAccount(ctx context.Context, account string) (string, string, error) {
-	if account != "" {
-		return account, "", nil
-	}
 	var response struct {
 		Login string `json:"login"`
 	}
-	remaining, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
+	_, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
 	if err != nil {
-		return "", "", fmt.Errorf("fetch authenticated user: %w", err)
+		return fmt.Errorf("fetch authenticated user: %w", err)
 	}
-	return response.Login, rateWarning(remaining), nil
+	if !strings.EqualFold(response.Login, expected) {
+		return fmt.Errorf("authenticated token belongs to %q, but GitHub CLI active account is %q", response.Login, expected)
+	}
+	c.account = expected
+	return nil
 }
 
 func (c *Client) RefreshBackground(ctx context.Context) (RefreshResult, error) {
 	now := time.Now()
-	verifiedAccount, rateWarning, err := c.resolveAccount(ctx, "")
-	if err != nil {
-		return RefreshResult{}, err
-	}
 
 	refreshCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -209,10 +191,11 @@ func (c *Client) RefreshBackground(ctx context.Context) (RefreshResult, error) {
 		return c.search(ctx, model.FeedMyPullRequests, now)
 	})
 	startFeedRefresh(model.FeedImportantNotifications, func(ctx context.Context) ([]model.Item, string, error) {
-		return c.fetchNotifications(ctx, verifiedAccount)
+		return c.fetchNotifications(ctx, c.account)
 	})
 
 	feeds := map[model.Feed][]model.Item{}
+	var rateWarning string
 	var firstErr error
 	for range 3 {
 		result := <-results
@@ -230,7 +213,7 @@ func (c *Client) RefreshBackground(ctx context.Context) (RefreshResult, error) {
 	}
 
 	return RefreshResult{
-		Account:     verifiedAccount,
+		Account:     c.account,
 		Feeds:       feeds,
 		RateWarning: rateWarning,
 		RefreshedAt: now,

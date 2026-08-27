@@ -181,7 +181,6 @@ func (m Model) Init() tea.Cmd {
 			m.refreshCmd(refreshBackground),
 			tickCmd(),
 			progressTickCmd(),
-			m.rateLimitsCmd(),
 		)
 	}
 	if m.updater != nil {
@@ -540,7 +539,6 @@ func (m Model) refreshCmd(kind refreshKind) tea.Cmd {
 	case refreshNotifications:
 		cached := m.store.Data().Feeds[model.FeedImportantNotifications]
 		request := github.NotificationRefreshRequest{
-			Account:  m.account,
 			Existing: append([]model.Item(nil), cached.Items...),
 			Since:    cached.RefreshedAt,
 		}

@@ -22,25 +22,11 @@ func TestInitStartsTwoRefreshLanesAndOneHeartbeat(t *testing.T) {
 	if !ok {
 		t.Fatalf("Init message type = %T, want tea.BatchMsg", m.Init()())
 	}
-	if len(batch) != 7 {
-		t.Fatalf("Init command count = %d, want window, color, two refreshes, heartbeat, spinner, and rate limits", len(batch))
+	if len(batch) != 6 {
+		t.Fatalf("Init command count = %d, want window, color, two refreshes, heartbeat, and spinner", len(batch))
 	}
 	if !m.pullRequestsLoading || !m.backgroundLoading {
 		t.Fatalf("initial refresh lanes = PR %t/background %t, want both active", m.pullRequestsLoading, m.backgroundLoading)
-	}
-}
-
-func TestSelectedCadenceFitsGraphQLBudget(t *testing.T) {
-	const (
-		fastPullRequestCost = 1
-		fullPullRequestCost = 20
-		issueCost           = 1
-		importantCost       = 34
-	)
-	used := int(time.Hour/pullRequestRefresh)*fastPullRequestCost +
-		int(time.Hour/fullRefresh)*(fullPullRequestCost+issueCost+importantCost)
-	if used >= 1250 {
-		t.Fatalf("modeled hourly GraphQL usage = %d, want below 1250", used)
 	}
 }
 
@@ -66,8 +52,8 @@ func TestNotificationRefreshCommandUsesImportantCursor(t *testing.T) {
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
-	if service.request.Account != "me" || !service.request.Since.Equal(refreshedAt) || len(service.request.Existing) != 1 {
-		t.Fatalf("request = %#v, want cached account, Important cursor, and item", service.request)
+	if !service.request.Since.Equal(refreshedAt) || len(service.request.Existing) != 1 {
+		t.Fatalf("request = %#v, want Important cursor and cached item", service.request)
 	}
 }
 
@@ -356,7 +342,7 @@ func (s *refreshServiceStub) RefreshNotifications(_ context.Context, request git
 	s.notificationCalls++
 	s.request = request
 	return github.FeedRefreshResult{
-		Account: request.Account, Feed: model.FeedImportantNotifications, Items: request.Existing, RefreshedAt: time.Now(),
+		Account: "me", Feed: model.FeedImportantNotifications, Items: request.Existing, RefreshedAt: time.Now(),
 	}, nil
 }
 

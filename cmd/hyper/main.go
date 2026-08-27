@@ -73,6 +73,9 @@ func run() error {
 	if verifyErr != nil {
 		return fmt.Errorf("verify GitHub CLI active account: %w", verifyErr)
 	}
+	if err := store.SetIdentity(authContext.Account, authContext.Host); err != nil {
+		return fmt.Errorf("initialize cache identity: %w", err)
+	}
 	if updater := releaseUpdater(authContext.Token); updater != nil {
 		return runProgram(tui.NewWithUpdater(client, store, authContext.Host, updater))
 	}

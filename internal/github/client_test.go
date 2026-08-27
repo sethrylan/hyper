@@ -40,6 +40,7 @@ func TestRateLimitsUsesRESTOnly(t *testing.T) {
 
 func TestPullRequestRefreshUsesLightweightAuthoredSearch(t *testing.T) {
 	client := NewClient("github.com", "token")
+	client.account = "me"
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -55,8 +56,8 @@ func TestPullRequestRefreshUsesLightweightAuthoredSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Feed != model.FeedMyPullRequests {
-		t.Fatalf("feed = %s, want My Pull Requests", result.Feed)
+	if result.Account != "me" || result.Feed != model.FeedMyPullRequests {
+		t.Fatalf("account/feed = %q/%s, want me/My Pull Requests", result.Account, result.Feed)
 	}
 }
 
@@ -123,6 +124,9 @@ func TestAccountVerificationDispatchesRequest(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("HTTP calls = %d, want one account verification request", calls)
+	}
+	if client.account != "new-account" {
+		t.Fatalf("verified account = %q, want new-account", client.account)
 	}
 }
 
@@ -385,6 +389,7 @@ func TestRefreshNotificationsIsAdditive(t *testing.T) {
 	}
 
 	client := NewClient("github.com", "token")
+	client.account = "me"
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/notifications":
@@ -401,7 +406,6 @@ func TestRefreshNotificationsIsAdditive(t *testing.T) {
 	})}
 
 	result, err := client.RefreshNotifications(t.Context(), NotificationRefreshRequest{
-		Account:  "me",
 		Existing: []model.Item{existing, retained},
 		Since:    time.Date(2026, 8, 7, 15, 3, 5, 0, time.UTC),
 	})
@@ -480,6 +484,7 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	client := NewClient("github.com", "token")
+	client.account = "me"
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		var body string
 		if req.Body != nil {
@@ -491,8 +496,6 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 		}
 
 		switch {
-		case req.URL.Path == "/user":
-			return jsonResponse(`{"login":"me"}`), nil
 		case req.URL.Path == "/graphql" && strings.Contains(body, "is:open is:issue"):
 			started <- "issues"
 			<-release
@@ -548,7 +551,7 @@ func TestBackgroundRefreshFetchesFeedsInParallel(t *testing.T) {
 	}
 }
 
-func TestBackgroundRefreshAlwaysResolvesAuthenticatedAccount(t *testing.T) {
+func TestBackgroundRefreshReusesVerifiedAccount(t *testing.T) {
 	var userCalls int
 	client := NewClient("github.com", "token")
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -566,12 +569,15 @@ func TestBackgroundRefreshAlwaysResolvesAuthenticatedAccount(t *testing.T) {
 		}
 	})}
 
+	if err := client.VerifyAccount(t.Context(), "new-account"); err != nil {
+		t.Fatal(err)
+	}
 	result, err := client.RefreshBackground(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if userCalls != 1 || result.Account != "new-account" {
-		t.Fatalf("account/user calls = %q/%d, want new-account/1", result.Account, userCalls)
+		t.Fatalf("account/user calls after verification and refresh = %q/%d, want new-account/1", result.Account, userCalls)
 	}
 	if len(result.Feeds) != 3 {
 		t.Fatalf("authoritative feeds = %#v, want all three feeds", result.Feeds)

@@ -110,6 +110,32 @@ func TestReplaceFeedsClearsFeedsWhenIdentityChanges(t *testing.T) {
 	}
 }
 
+func TestSetIdentityClearsAndPersistsFeedsBeforeRefresh(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaceErr := store.ReplaceFeeds("old-account", "github.com", map[model.Feed][]model.Item{
+		model.FeedImportantNotifications: {{Key: "private-notification"}},
+		model.FeedMyPullRequests:         {{Key: "private-pr"}},
+	}, time.Now()); replaceErr != nil {
+		t.Fatal(replaceErr)
+	}
+	if identityErr := store.SetIdentity("new-account", "github.com"); identityErr != nil {
+		t.Fatal(identityErr)
+	}
+
+	reloaded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := reloaded.Data()
+	if data.Account != "new-account" || data.Host != "github.com" || len(data.Feeds) != 0 {
+		t.Fatalf("cache after identity reset = %#v, want new identity with no feeds", data)
+	}
+}
+
 func TestLegacyCacheDropsFeedsButPreservesDoneState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.json")
 	legacy := `{"account":"me","items":{"item":{"key":"item"}},"feed_item_ids":{"important_notifications":["item"]},"done":{"item":{"done_at":"2026-08-27T14:00:00Z","updated_at":"2026-08-27T13:00:00Z"}}}`

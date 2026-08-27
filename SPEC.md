@@ -37,7 +37,7 @@ The app is intentionally read-mostly for v1. It may mutate local state, but it m
 `hyper` must use the GitHub CLI for authentication only.
 
 - On startup, verify `gh` is installed and authenticated for `github.com`.
-- Resolve the locally selected GitHub CLI account, then verify the token owner with a direct API request before starting refresh or update commands.
+- Resolve the locally selected GitHub CLI account, verify the token owner with a direct API request, and reset cached feeds to that identity before starting refresh or update commands.
 - If authentication is missing or expired, fail with clear setup instructions, for example `gh auth login`.
 - After auth validation, use the token to call GitHub APIs directly from Go rather than shelling out to `gh api`.
 - Prefer `github.com/cli/go-gh` for resolving the authenticated host/account/token context, combined with direct `net/http` calls for GraphQL where needed. Use `github.com/google/go-github` only where it materially reduces REST boilerplate.
