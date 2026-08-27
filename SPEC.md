@@ -37,6 +37,7 @@ The app is intentionally read-mostly for v1. It may mutate local state, but it m
 `hyper` must use the GitHub CLI for authentication only.
 
 - On startup, verify `gh` is installed and authenticated for `github.com`.
+- Resolve the locally selected GitHub CLI account before opening its API usage ledger, then verify the token owner with a budgeted request before starting refresh or update commands.
 - If authentication is missing or expired, fail with clear setup instructions, for example `gh auth login`.
 - After auth validation, use the token to call GitHub APIs directly from Go rather than shelling out to `gh api`.
 - Prefer `github.com/cli/go-gh` for resolving the authenticated host/account/token context, combined with direct `net/http` calls for GraphQL where needed. Use `github.com/google/go-github` only where it materially reduces REST boilerplate.
@@ -110,7 +111,7 @@ is:open is:issue author:@me archived:false created:>@RELATIVE_DATE
   - Defer lower-priority refreshes before slowing My Pull Requests.
   - Do not retry a primary rate-limit failure until a later scheduled refresh.
   - Prefer preserving the current cached view over clearing the screen.
-- Read core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted, and show Hyper's persisted budget usage separately from account-wide usage.
+- Read account-wide core, GraphQL, and search quota status from the REST rate-limit endpoint so the rate-limit screen still works after GraphQL is exhausted.
 - `r` refreshes the pull request lane from My Pull Requests and runs the authoritative background lane from Important Notifications or My Issues.
 
 ## Cache and local state

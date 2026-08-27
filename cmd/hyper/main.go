@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -55,7 +57,7 @@ func run() error {
 		return runDemo()
 	}
 
-	ctx, err := auth.Resolve("github.com")
+	authContext, err := auth.Resolve("github.com")
 	if err != nil {
 		return err
 	}
@@ -65,16 +67,22 @@ func run() error {
 		return fmt.Errorf("open cache: %w", err)
 	}
 
-	budget, err := quota.OpenDefault(ctx.Host, store.Data().Account)
+	budget, err := quota.OpenDefault(authContext.Host, authContext.Account)
 	if err != nil {
 		return fmt.Errorf("open API usage ledger: %w", err)
 	}
 	defer func() { _ = budget.Close() }()
-	client := github.NewBudgetedClient(ctx.Host, ctx.Token, budget)
-	if updater := releaseUpdater(ctx.Token, budget); updater != nil {
-		return runProgram(tui.NewWithUpdater(client, store, ctx.Host, updater))
+	client := github.NewBudgetedClient(authContext.Host, authContext.Token, budget)
+	verifyContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	verifyErr := client.VerifyAccount(verifyContext, authContext.Account)
+	cancel()
+	if verifyErr != nil {
+		return fmt.Errorf("verify GitHub CLI active account: %w", verifyErr)
 	}
-	return runProgram(tui.New(client, store, ctx.Host))
+	if updater := releaseUpdater(authContext.Token, budget); updater != nil {
+		return runProgram(tui.NewWithUpdater(client, store, authContext.Host, updater))
+	}
+	return runProgram(tui.New(client, store, authContext.Host))
 }
 
 func releaseUpdater(token string, budget *quota.Manager) *autoupdate.Service {

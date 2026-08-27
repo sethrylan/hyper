@@ -168,13 +168,19 @@ func (c *Client) RefreshNotifications(ctx context.Context, request NotificationR
 	}, nil
 }
 
+func (c *Client) VerifyAccount(ctx context.Context, expected string) error {
+	account, _, err := c.resolveAccount(ctx, "")
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(account, expected) {
+		return fmt.Errorf("authenticated token belongs to %q, but GitHub CLI active account is %q", account, expected)
+	}
+	return nil
+}
+
 func (c *Client) resolveAccount(ctx context.Context, account string) (string, string, error) {
 	if account != "" {
-		if c.budget != nil {
-			if err := c.budget.SetIdentity(c.host, account); err != nil {
-				return "", "", fmt.Errorf("persist API budget identity: %w", err)
-			}
-		}
 		return account, "", nil
 	}
 	var response struct {
@@ -183,11 +189,6 @@ func (c *Client) resolveAccount(ctx context.Context, account string) (string, st
 	remaining, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
 	if err != nil {
 		return "", "", fmt.Errorf("fetch authenticated user: %w", err)
-	}
-	if c.budget != nil {
-		if err := c.budget.SetIdentity(c.host, response.Login); err != nil {
-			return "", "", fmt.Errorf("persist API budget identity: %w", err)
-		}
 	}
 	return response.Login, rateWarning(remaining), nil
 }

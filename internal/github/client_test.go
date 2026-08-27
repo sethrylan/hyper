@@ -159,6 +159,38 @@ func TestBudgetExhaustionStopsRequestBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestAccountVerificationKeepsExistingQuotaReservations(t *testing.T) {
+	budget := quota.NewManager("github.com", "new-account")
+	if _, err := budget.Reserve(quota.ResourceCore, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	client := NewBudgetedClient("github.com", "token", budget)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/user" {
+			t.Fatalf("path = %q, want /user", req.URL.Path)
+		}
+		return jsonResponse(`{"login":"new-account"}`), nil
+	})}
+
+	if err := client.VerifyAccount(t.Context(), "new-account"); err != nil {
+		t.Fatal(err)
+	}
+	if got := budget.Status(time.Now()).Resources[quota.ResourceCore].Used; got != 2 {
+		t.Fatalf("core usage = %d, want prior reservation plus accounted identity lookup", got)
+	}
+}
+
+func TestAccountVerificationRejectsTokenMismatch(t *testing.T) {
+	client := NewClient("github.com", "token")
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(`{"login":"token-owner"}`), nil
+	})}
+
+	if err := client.VerifyAccount(t.Context(), "configured-account"); err == nil {
+		t.Fatal("expected mismatched token owner to fail verification")
+	}
+}
+
 func TestRetryDelay(t *testing.T) {
 	tests := map[int]time.Duration{
 		1: 0,

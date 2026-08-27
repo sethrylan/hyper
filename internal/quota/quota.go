@@ -95,32 +95,13 @@ func Open(path, host, account string) (*Manager, error) {
 
 func newManager(path string, state State, host, account string) *Manager {
 	ensureResources(&state)
-	if state.Host != "" && state.Host != host || state.Account != "" && account != "" && state.Account != account {
+	if state.Host != "" && state.Host != host || state.Account != "" && state.Account != account {
 		state = State{}
 		ensureResources(&state)
 	}
 	state.Host = host
-	if account != "" {
-		state.Account = account
-	}
+	state.Account = account
 	return &Manager{path: path, state: state}
-}
-
-func (m *Manager) SetIdentity(host, account string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.state.Host == host && (account == "" || m.state.Account == account) {
-		return nil
-	}
-	if m.state.Host != "" && m.state.Host != host || m.state.Account != "" && account != "" && m.state.Account != account {
-		m.state = State{}
-		ensureResources(&m.state)
-	}
-	m.state.Host = host
-	if account != "" {
-		m.state.Account = account
-	}
-	return m.saveLocked()
 }
 
 func (m *Manager) Configure(resource Resource, limit int, resetAt, now time.Time) error {
