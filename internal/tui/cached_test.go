@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sethrylan/hyper/internal/cache"
+	"github.com/sethrylan/hyper/internal/model"
 )
 
 func TestNewCachedDisablesGitHubActions(t *testing.T) {
@@ -16,12 +17,14 @@ func TestNewCachedDisablesGitHubActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	refreshedAt := time.Date(2000, time.January, 1, 15, 4, 0, 0, time.UTC)
-	if err := store.Replace("mona", "github.com", nil, refreshedAt); err != nil {
+	if err := store.ReplaceFeeds("mona", "github.com", map[model.Feed][]model.Item{
+		model.FeedMyIssues: nil,
+	}, refreshedAt); err != nil {
 		t.Fatal(err)
 	}
 
 	m := NewCached(store, "github.com")
-	if m.service != nil || m.loading {
+	if m.service != nil || m.refreshing() {
 		t.Fatal("cached model should not have a GitHub service or active refresh")
 	}
 	if m.status != "refreshed 3:04PM" {
@@ -29,7 +32,7 @@ func TestNewCachedDisablesGitHubActions(t *testing.T) {
 	}
 	for _, action := range []Action{ActionRefresh, ActionRateLimits} {
 		updated, cmd := m.handleAction(action)
-		if cmd != nil || updated.loading || updated.showRateLimits {
+		if cmd != nil || updated.refreshing() || updated.showRateLimits {
 			t.Fatalf("action %q started a GitHub operation", action)
 		}
 	}

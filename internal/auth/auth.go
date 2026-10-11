@@ -7,12 +7,14 @@ import (
 	"os/exec"
 
 	ghauth "github.com/cli/go-gh/v2/pkg/auth"
+	ghconfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
 type Context struct {
-	Host   string
-	Source string
-	Token  string
+	Account string
+	Host    string
+	Source  string
+	Token   string
 }
 
 func Resolve(host string) (Context, error) {
@@ -29,5 +31,21 @@ func Resolve(host string) (Context, error) {
 	if token == "" {
 		return Context{}, errors.New("GitHub authentication is missing or expired; run `gh auth login --hostname github.com`")
 	}
-	return Context{Host: host, Source: source, Token: token}, nil
+	config, err := ghconfig.Read(nil)
+	if err != nil {
+		return Context{}, fmt.Errorf("read GitHub CLI configuration: %w", err)
+	}
+	account, err := activeAccount(config, host)
+	if err != nil {
+		return Context{}, err
+	}
+	return Context{Account: account, Host: host, Source: source, Token: token}, nil
+}
+
+func activeAccount(config *ghconfig.Config, host string) (string, error) {
+	account, err := config.Get([]string{"hosts", ghauth.NormalizeHostname(host), "user"})
+	if err != nil || account == "" {
+		return "", errors.New("GitHub CLI active account is missing; run `gh auth login --hostname github.com`")
+	}
+	return account, nil
 }
