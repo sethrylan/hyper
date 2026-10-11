@@ -841,8 +841,7 @@ func retryable(err error, headers http.Header) bool {
 	if rateLimitExhausted(headers) {
 		return false
 	}
-	var status statusError
-	if errors.As(err, &status) {
+	if status, ok := errors.AsType[statusError](err); ok {
 		switch status.code {
 		case http.StatusForbidden:
 			body := strings.ToLower(status.body)
