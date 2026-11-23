@@ -14,12 +14,11 @@ import (
 
 func TestRenderWithBorderAddsBlankPadding(t *testing.T) {
 	m := Model{
-		height:   8,
-		width:    40,
-		expanded: map[string]bool{},
-		feeds:    emptyFeeds(),
-		host:     "github.com",
-		status:   "ready",
+		height: 8,
+		width:  40,
+		feeds:  emptyFeeds(),
+		host:   "github.com",
+		status: "ready",
 	}
 
 	lines := strings.Split(m.renderWithBorder(), "\n")
@@ -41,11 +40,10 @@ func TestRenderWithBorderAddsBlankPadding(t *testing.T) {
 
 func TestRenderIncludesSeparatorBeforeStatus(t *testing.T) {
 	m := Model{
-		width:    40,
-		expanded: map[string]bool{},
-		feeds:    emptyFeeds(),
-		host:     "github.com",
-		status:   "ready",
+		width:  40,
+		feeds:  emptyFeeds(),
+		host:   "github.com",
+		status: "ready",
 	}
 
 	lines := strings.Split(m.render(), "\n")

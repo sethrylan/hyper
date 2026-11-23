@@ -14,13 +14,14 @@ func Open(url string) error {
 		return errors.New("no URL to open")
 	}
 	var cmd *exec.Cmd
+	//nolint:gosec // Each opener receives the URL as a single argument.
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(context.Background(), "open", url) //nolint:gosec,nolintlint // URL is passed as a single argument to the OS opener.
+		cmd = exec.CommandContext(context.Background(), "open", url)
 	case "windows":
-		cmd = exec.CommandContext(context.Background(), "rundll32", "url.dll,FileProtocolHandler", url) //nolint:gosec,nolintlint // URL is passed as a single argument to the OS opener.
+		cmd = exec.CommandContext(context.Background(), "rundll32", "url.dll,FileProtocolHandler", url)
 	default:
-		cmd = exec.CommandContext(context.Background(), "xdg-open", url) //nolint:gosec,nolintlint // URL is passed as a single argument to the OS opener.
+		cmd = exec.CommandContext(context.Background(), "xdg-open", url)
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("open URL: %w", err)

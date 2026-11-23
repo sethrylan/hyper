@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -57,7 +58,7 @@ type Model struct {
 	backgroundStart     time.Time
 	cancel              context.CancelFunc
 	ctx                 context.Context
-	expanded            map[string]bool
+	collapsed           map[string]bool
 	feeds               map[model.Feed][]model.Item
 	height              int
 	host                string
@@ -73,7 +74,7 @@ type Model struct {
 	rateLimitsLoading   bool
 	rows                []row
 	selected            int
-	selectedByFeed      map[model.Feed]int
+	selectedByFeed      [len(model.Feeds)]int
 	service             service
 	showHelp            bool
 	showRateLimits      bool
@@ -94,7 +95,6 @@ const (
 
 type row struct {
 	item model.Item
-	key  string
 	kind rowKind
 	repo string
 }
@@ -152,7 +152,7 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 		backgroundStart:     now,
 		cancel:              cancel,
 		ctx:                 ctx,
-		expanded:            map[string]bool{},
+		collapsed:           map[string]bool{},
 		feeds:               feedsFromCache(data),
 		host:                host,
 		nextBackground:      now.Add(fullRefresh),
@@ -160,14 +160,10 @@ func newModel(service service, store *cache.Store, host string, updater updateSe
 		nextPullRequests:    now.Add(pullRequestRefresh),
 		pullRequestsLoading: service != nil,
 		pullRequestsStart:   now,
-		selectedByFeed:      map[model.Feed]int{},
 		service:             service,
 		status:              cacheStatus(data),
 		store:               store,
 		updater:             updater,
-	}
-	for _, feed := range model.Feeds {
-		m.expanded["feed:"+string(feed)] = true
 	}
 	m.rebuildRows()
 	return m
@@ -194,8 +190,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-	case tea.BackgroundColorMsg:
-		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleAction(ActionForKey(msg.Keystroke()))
 	case feedRefreshMsg:
@@ -204,10 +198,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = refreshName(msg.kind) + " refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
-		account := m.account
-		if msg.result.Account != "" {
-			account = msg.result.Account
-		}
+		account := cmp.Or(msg.result.Account, m.account)
 		items := msg.result.Items
 		if msg.kind == refreshPullRequests {
 			items = mergeFeedChanges(m.feeds[msg.result.Feed], items)
@@ -233,10 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "background refresh deferred: " + msg.err.Error()
 			return m, nil
 		}
-		account := m.account
-		if msg.result.Account != "" {
-			account = msg.result.Account
-		}
+		account := cmp.Or(msg.result.Account, m.account)
 		if err := m.store.ReplaceFeeds(account, m.host, msg.result.Feeds, msg.result.RefreshedAt); err != nil {
 			m.status = "cache save failed: " + err.Error()
 			return m, nil
@@ -315,9 +303,9 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 	switch action {
 	case ActionNone:
 	case ActionDown:
-		m.selectNext()
+		m.moveSelection(1)
 	case ActionUp:
-		m.selectPrev()
+		m.moveSelection(-1)
 	case ActionExpand:
 		m.expandSelected()
 	case ActionCollapse:
@@ -369,15 +357,9 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 			m.showRateLimits = false
 		}
 	case ActionNextFeed:
-		m.rememberSelection()
-		m.activeFeed = (m.activeFeed + 1) % len(model.Feeds)
-		m.restoreSelection()
-		m.rebuildRows()
+		m.switchFeed(1)
 	case ActionPrevFeed:
-		m.rememberSelection()
-		m.activeFeed = (m.activeFeed - 1 + len(model.Feeds)) % len(model.Feeds)
-		m.restoreSelection()
-		m.rebuildRows()
+		m.switchFeed(-1)
 	case ActionQuit:
 		m.cancel()
 		return m, tea.Quit
@@ -385,32 +367,24 @@ func (m Model) handleAction(action Action) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) selectNext() {
-	for i := m.selected + 1; i < len(m.rows); i++ {
-		if m.selectable(i) {
+func (m *Model) switchFeed(step int) {
+	m.selectedByFeed[m.activeFeed] = m.selected
+	m.activeFeed = (m.activeFeed + step + len(model.Feeds)) % len(model.Feeds)
+	m.selected = m.selectedByFeed[m.activeFeed]
+	m.rebuildRows()
+}
+
+func (m *Model) moveSelection(step int) {
+	for i := m.selected + step; i >= 0 && i < len(m.rows); i += step {
+		if m.selectable(m.rows[i]) {
 			m.selected = i
-			m.rememberSelection()
 			return
 		}
 	}
 }
 
-func (m *Model) selectPrev() {
-	for i := m.selected - 1; i >= 0; i-- {
-		if m.selectable(i) {
-			m.selected = i
-			m.rememberSelection()
-			return
-		}
-	}
-}
-
-func (m Model) selectable(index int) bool {
-	if index < 0 || index >= len(m.rows) {
-		return false
-	}
-	selectedRow := m.rows[index]
-	return selectedRow.kind == rowItem || (selectedRow.kind == rowRepo && !m.expanded[selectedRow.key])
+func (m Model) selectable(r row) bool {
+	return r.kind == rowItem || m.collapsed[r.repo]
 }
 
 func (m *Model) expandSelected() {
@@ -419,7 +393,7 @@ func (m *Model) expandSelected() {
 	}
 	selected := m.rows[m.selected]
 	if selected.kind == rowRepo {
-		m.expanded[selected.key] = true
+		delete(m.collapsed, selected.repo)
 		m.rebuildRows()
 	}
 }
@@ -429,8 +403,8 @@ func (m *Model) collapseSelected() {
 		return
 	}
 	selected := m.rows[m.selected]
-	if selected.kind == rowRepo && m.expanded[selected.key] {
-		m.expanded[selected.key] = false
+	if selected.kind == rowRepo && !m.collapsed[selected.repo] {
+		m.collapsed[selected.repo] = true
 		m.rebuildRows()
 		return
 	}
@@ -438,7 +412,6 @@ func (m *Model) collapseSelected() {
 		for i := range m.rows {
 			if m.rows[i].kind == rowRepo && m.rows[i].repo == selected.repo {
 				m.selected = i
-				m.rememberSelection()
 				return
 			}
 		}
@@ -539,7 +512,7 @@ func (m Model) refreshCmd(kind refreshKind) tea.Cmd {
 	case refreshNotifications:
 		cached := m.store.Data().Feeds[model.FeedImportantNotifications]
 		request := github.NotificationRefreshRequest{
-			Existing: append([]model.Item(nil), cached.Items...),
+			Existing: cached.Items,
 			Since:    cached.RefreshedAt,
 		}
 		return func() tea.Msg {
@@ -665,16 +638,12 @@ func (m *Model) rebuildRows() {
 		}
 		if repo != currentRepo {
 			currentRepo = repo
-			key := "repo:" + repo
-			if _, ok := m.expanded[key]; !ok {
-				m.expanded[key] = true
-			}
-			rows = append(rows, row{kind: rowRepo, key: key, repo: repo})
+			rows = append(rows, row{kind: rowRepo, repo: repo})
 		}
-		if !m.expanded["repo:"+repo] {
+		if m.collapsed[repo] {
 			continue
 		}
-		rows = append(rows, row{kind: rowItem, key: item.Key, repo: repo, item: item})
+		rows = append(rows, row{kind: rowItem, repo: repo, item: item})
 	}
 	m.rows = rows
 	m.normalizeSelection()
@@ -683,47 +652,12 @@ func (m *Model) rebuildRows() {
 func (m *Model) normalizeSelection() {
 	if len(m.rows) == 0 {
 		m.selected = 0
-		m.rememberSelection()
 		return
 	}
-	if m.selected >= len(m.rows) {
-		m.selected = len(m.rows) - 1
+	m.selected = max(0, min(m.selected, len(m.rows)-1))
+	if !m.selectable(m.rows[m.selected]) {
+		m.moveSelection(1)
 	}
-	if m.selectable(m.selected) {
-		m.rememberSelection()
-		return
-	}
-	for i := m.selected + 1; i < len(m.rows); i++ {
-		if m.selectable(i) {
-			m.selected = i
-			m.rememberSelection()
-			return
-		}
-	}
-	for i := m.selected - 1; i >= 0; i-- {
-		if m.selectable(i) {
-			m.selected = i
-			m.rememberSelection()
-			return
-		}
-	}
-	m.selected = 0
-	m.rememberSelection()
-}
-
-func (m *Model) rememberSelection() {
-	if m.selectedByFeed == nil {
-		m.selectedByFeed = map[model.Feed]int{}
-	}
-	m.selectedByFeed[model.Feeds[m.activeFeed]] = m.selected
-}
-
-func (m *Model) restoreSelection() {
-	m.selected = 0
-	if m.selectedByFeed == nil {
-		return
-	}
-	m.selected = m.selectedByFeed[model.Feeds[m.activeFeed]]
 }
 
 func (m Model) render() string {
@@ -733,17 +667,13 @@ func (m Model) render() string {
 	if m.showRateLimits {
 		return m.renderRateLimits()
 	}
-	var b strings.Builder
-	b.WriteString(m.renderFeeds())
-	b.WriteString("\n")
-	b.WriteString(m.renderRows())
-	b.WriteString("\n")
-	b.WriteString(m.renderSeparator())
-	b.WriteString("\n")
-	b.WriteString(m.renderStatus())
-	b.WriteString("\n")
-	b.WriteString(helpStyle().Render(m.renderFooterHelp()))
-	return b.String()
+	return strings.Join([]string{
+		m.renderFeeds(),
+		m.renderRows(),
+		m.renderSeparator(),
+		m.renderStatus(),
+		helpStyle().Render(m.renderFooterHelp()),
+	}, "\n")
 }
 
 func (m Model) renderFooterHelp() string {
@@ -793,7 +723,7 @@ func (m Model) renderFeeds() string {
 	for i, feed := range model.Feeds {
 		label := fmt.Sprintf("%s (%d)", feed.Title(), len(m.feeds[feed]))
 		if i == m.activeFeed {
-			parts = append(parts, selectedStyle().Render(label))
+			parts = append(parts, accentStyle().Render(label))
 		} else {
 			parts = append(parts, label)
 		}
@@ -828,7 +758,7 @@ func (m Model) renderRows() string {
 	for i := start; i < end; i++ {
 		line := m.renderRow(m.rows[i], rowWidth, layout)
 		if i == m.selected {
-			line = selectedStyle().Render("> " + line)
+			line = accentStyle().Render("> " + line)
 		} else {
 			line = "  " + line
 		}
@@ -858,7 +788,7 @@ func (m Model) renderRow(r row, width int, layout itemRowLayout) string {
 	switch r.kind {
 	case rowRepo:
 		marker := "▾"
-		if !m.expanded[r.key] {
+		if m.collapsed[r.repo] {
 			marker = "▸"
 		}
 		return repoStyle().Render(marker + " " + r.repo)
@@ -873,10 +803,7 @@ func (m Model) renderRow(r row, width int, layout itemRowLayout) string {
 }
 
 func (m Model) renderStatus() string {
-	account := m.account
-	if account == "" {
-		account = "unknown"
-	}
+	account := cmp.Or(m.account, unknownValue)
 	status := m.status
 	if m.refreshing() {
 		status = fmt.Sprintf("%s refreshing from GitHub (%s)", spinnerFrame(m.spinner), formatDuration(time.Since(m.refreshStartedAt())))
@@ -892,7 +819,7 @@ func (m Model) renderStatus() string {
 
 func (m Model) renderHelp() string {
 	lines := []string{
-		titleStyle().Render("hyper help"),
+		accentStyle().Render("hyper help"),
 		"",
 		"j/down        select next visible item",
 		"k/up          select previous visible item",
@@ -916,9 +843,9 @@ func (m Model) renderHelp() string {
 
 func (m Model) renderRateLimits() string {
 	lines := []string{
-		titleStyle().Render("GitHub rate limits"),
+		accentStyle().Render("GitHub rate limits"),
 		"",
-		"account: " + displayAccount(m.account),
+		"account: " + cmp.Or(m.account, unknownValue),
 		"",
 	}
 	switch {
@@ -936,15 +863,6 @@ func (m Model) renderRateLimits() string {
 	}
 	lines = append(lines, "", "shift+r      close", "q/Ctrl+C     quit")
 	return strings.Join(lines, "\n")
-}
-
-func displayAccount(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return unknownValue
 }
 
 func renderRateLimitLine(label string, resource github.RateLimitResource) string {
@@ -1087,7 +1005,7 @@ func age(t time.Time) string {
 	}
 }
 
-func selectedStyle() lipgloss.Style {
+func accentStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 }
 
@@ -1105,8 +1023,4 @@ func helpStyle() lipgloss.Style {
 
 func statusStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-}
-
-func titleStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -83,7 +84,7 @@ func TestPullRequestRefreshFetchesOnlyNewestPage(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("GraphQL calls = %d, want exactly one even when another page exists", calls)
 	}
-	if len(result.Items) != 1 || result.Items[0].Key == "" {
+	if len(result.Items) != 1 || result.Items[0].Key != "github.com|PR_1" || result.Items[0].Type != model.ItemTypePullRequest {
 		t.Fatalf("items = %#v, want the first-page pull request", result.Items)
 	}
 }
@@ -185,7 +186,7 @@ func TestDoWithHeadersRetriesTransientStatus(t *testing.T) {
 		return nil
 	}
 
-	raw, _, err := client.doWithHeaders(t.Context(), http.MethodPost, server.URL, "application/json", io.NopCloser(&stringReader{s: "payload"}))
+	raw, _, err := client.doWithHeaders(t.Context(), http.MethodPost, server.URL, []byte("payload"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +217,7 @@ func TestDoWithHeadersDoesNotRetryPlainForbidden(t *testing.T) {
 		return nil
 	}
 
-	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, server.URL, "", nil); err == nil {
+	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, server.URL, nil); err == nil {
 		t.Fatal("expected forbidden error")
 	}
 	if calls != 1 {
@@ -232,16 +233,11 @@ func TestDoWithHeadersRetriesContextDeadlineExceeded(t *testing.T) {
 		if calls == 1 {
 			return nil, context.DeadlineExceeded
 		}
-		return &http.Response{
-			Body:       io.NopCloser(&stringReader{s: `{"ok":true}`}),
-			Header:     http.Header{},
-			Status:     "200 OK",
-			StatusCode: http.StatusOK,
-		}, nil
+		return jsonResponse(`{"ok":true}`), nil
 	})}
 	client.retrySleep = func(context.Context, time.Duration) error { return nil }
 
-	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, "https://api.github.com/graphql", "", nil); err != nil {
+	if _, _, err := client.doWithHeaders(t.Context(), http.MethodGet, "https://api.github.com/graphql", nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -312,7 +308,7 @@ func TestSupplementalSearchStopsWhenGraphQLRateLimitIsExhausted(t *testing.T) {
 		return nil
 	}
 
-	_, warning := client.fetchSupplementalImportantItems(t.Context(), "me", time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC))
+	_, warning := client.fetchSupplementalImportantItems(t.Context(), time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC))
 	if calls != 1 {
 		t.Fatalf("calls = %d, want supplemental search to stop after 1", calls)
 	}
@@ -416,7 +412,7 @@ func TestRefreshNotificationsIsAdditive(t *testing.T) {
 	if len(notifications) != 3 {
 		t.Fatalf("items = %d, want updated, retained, and new mention", len(notifications))
 	}
-	if notifications[0].Title != "new title" || !containsFoldForTest(notifications[0].Reviewers, "me") {
+	if notifications[0].Title != "new title" || !slices.Contains(notifications[0].Reviewers, "me") {
 		t.Fatalf("updated item = %#v, want fresh REST fields plus cached reviewer", notifications[0])
 	}
 	if notifications[1].Key != retained.Key {
@@ -624,31 +620,9 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-type stringReader struct {
-	s string
-}
-
-func (r *stringReader) Read(p []byte) (int, error) {
-	if r.s == "" {
-		return 0, io.EOF
-	}
-	n := copy(p, r.s)
-	r.s = r.s[n:]
-	return n, nil
-}
-
 func containsString(values []supplementalImportantQuery, needle string) bool {
 	for _, value := range values {
 		if value.Query == needle {
-			return true
-		}
-	}
-	return false
-}
-
-func containsFoldForTest(values []string, needle string) bool {
-	for _, value := range values {
-		if strings.EqualFold(value, needle) {
 			return true
 		}
 	}
