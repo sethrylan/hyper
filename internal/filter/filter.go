@@ -16,7 +16,9 @@ func Query(feed model.Feed, now time.Time) (string, error) {
 	cutoff := now.AddDate(0, 0, -defaultRelativeDays).Format("2006-01-02")
 	switch feed {
 	case model.FeedMyPullRequests:
-		return "is:open is:pr author:@me archived:false created:>" + cutoff, nil
+		// A pull request created after the cutoff is also updated after it,
+		// so updated:> covers "created or updated".
+		return "is:open is:pr author:@me archived:false updated:>" + cutoff, nil
 	case model.FeedMyIssues:
 		return "is:open is:issue author:@me archived:false created:>" + cutoff, nil
 	default:
