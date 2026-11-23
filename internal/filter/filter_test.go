@@ -14,7 +14,7 @@ func TestQuery_DefaultRelativeDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "is:open is:pr author:@me archived:false created:>2026-04-12"
+	want := "is:open is:pr author:@me archived:false updated:>2026-04-12"
 	if query != want {
 		t.Fatalf("query = %q, want %q", query, want)
 	}

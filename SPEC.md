@@ -76,10 +76,10 @@ Because REST notifications do not expose all fields available to Hyperlist Mac's
 ### My Pull Requests
 
 ```text
-is:open is:pr author:@me archived:false created:>@RELATIVE_DATE
+is:open is:pr author:@me archived:false updated:>@RELATIVE_DATE
 ```
 
-`@RELATIVE_DATE` defaults to 30 days ago.
+`@RELATIVE_DATE` defaults to 30 days ago. The `updated:` qualifier also matches every pull request created after that date.
 
 ### My Issues
 
