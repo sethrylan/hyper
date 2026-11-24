@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/sethrylan/hyper/internal/jsonfile"
@@ -46,34 +47,36 @@ func OpenDefault() (*Store, error) {
 }
 
 func Open(path string) (*Store, error) {
-	store := &Store{path: path, data: emptyData()}
-	var loaded Data
-	found, err := jsonfile.Read(path, &loaded)
-	if err != nil {
+	var data Data
+	if err := jsonfile.Read(path, &data); err != nil {
 		return nil, fmt.Errorf("read cache: %w", err)
 	}
-	if !found {
-		return store, nil
+	if data.Version != schemaVersion {
+		// Local Done markers survive feed schema changes.
+		data = Data{Version: schemaVersion, Done: data.Done}
 	}
-	if loaded.Version != schemaVersion {
-		// Feed data is disposable, but local Done markers are user state.
-		store.data.Done = loaded.Done
-		ensureMaps(&store.data)
-		return store, nil
+	if data.Done == nil {
+		data.Done = map[string]DoneState{}
 	}
-	ensureMaps(&loaded)
-	store.data = loaded
-	return store, nil
+	if data.Feeds == nil {
+		data.Feeds = map[model.Feed]FeedData{}
+	}
+	return &Store{path: path, data: data}, nil
 }
 
 func (s *Store) Data() Data {
-	ensureMaps(&s.data)
-	return cloneData(s.data)
+	data := s.data
+	data.Done = maps.Clone(data.Done)
+	data.Feeds = make(map[model.Feed]FeedData, len(s.data.Feeds))
+	for feed, cached := range s.data.Feeds {
+		cached.Items = cloneItems(cached.Items)
+		data.Feeds[feed] = cached
+	}
+	return data
 }
 
 // SetIdentity clears cached feeds before they can be reused for another account or host.
 func (s *Store) SetIdentity(account, host string) error {
-	ensureMaps(&s.data)
 	if s.data.Account == account && s.data.Host == host {
 		return nil
 	}
@@ -85,7 +88,6 @@ func (s *Store) SetIdentity(account, host string) error {
 
 // ReplaceFeeds replaces only the supplied feeds and advances their cursors.
 func (s *Store) ReplaceFeeds(account, host string, feeds map[model.Feed][]model.Item, refreshedAt time.Time) error {
-	ensureMaps(&s.data)
 	if s.data.Account != account || s.data.Host != host {
 		s.data.Feeds = map[model.Feed]FeedData{}
 	}
@@ -107,7 +109,6 @@ func (s *Store) ReplaceFeeds(account, host string, feeds map[model.Feed][]model.
 }
 
 func (s *Store) MarkDone(item model.Item, doneAt time.Time) error {
-	ensureMaps(&s.data)
 	item.Done = true
 	item.DoneAt = doneAt
 	s.replaceImportantItem(item)
@@ -116,7 +117,6 @@ func (s *Store) MarkDone(item model.Item, doneAt time.Time) error {
 }
 
 func (s *Store) MarkUndone(item model.Item) error {
-	ensureMaps(&s.data)
 	delete(s.data.Done, item.Key)
 	item.Done = false
 	item.DoneAt = time.Time{}
@@ -160,34 +160,6 @@ func ReconcileDone(items []model.Item, done map[string]DoneState) []model.Item {
 	return out
 }
 
-func emptyData() Data {
-	data := Data{Version: schemaVersion}
-	ensureMaps(&data)
-	return data
-}
-
-func ensureMaps(data *Data) {
-	data.Version = schemaVersion
-	if data.Done == nil {
-		data.Done = map[string]DoneState{}
-	}
-	if data.Feeds == nil {
-		data.Feeds = map[model.Feed]FeedData{}
-	}
-}
-
-func cloneData(data Data) Data {
-	clone := data
-	clone.Done = make(map[string]DoneState, len(data.Done))
-	maps.Copy(clone.Done, data.Done)
-	clone.Feeds = make(map[model.Feed]FeedData, len(data.Feeds))
-	for feed, cached := range data.Feeds {
-		cached.Items = cloneItems(cached.Items)
-		clone.Feeds[feed] = cached
-	}
-	return clone
-}
-
 func cloneItems(items []model.Item) []model.Item {
 	clone := make([]model.Item, len(items))
 	for i, item := range items {
@@ -197,17 +169,15 @@ func cloneItems(items []model.Item) []model.Item {
 }
 
 func cloneItem(item model.Item) model.Item {
-	item.Assignees = append([]string(nil), item.Assignees...)
-	item.Reviewers = append([]string(nil), item.Reviewers...)
-	item.ReviewRequests = append([]string(nil), item.ReviewRequests...)
-	item.SourceFeeds = append([]model.Feed(nil), item.SourceFeeds...)
+	item.Assignees = slices.Clone(item.Assignees)
+	item.Reviewers = slices.Clone(item.Reviewers)
+	item.ReviewRequests = slices.Clone(item.ReviewRequests)
+	item.SourceFeeds = slices.Clone(item.SourceFeeds)
 	if item.Read != nil {
-		value := *item.Read
-		item.Read = &value
+		item.Read = new(*item.Read)
 	}
 	if item.Saved != nil {
-		value := *item.Saved
-		item.Saved = &value
+		item.Saved = new(*item.Saved)
 	}
 	return item
 }

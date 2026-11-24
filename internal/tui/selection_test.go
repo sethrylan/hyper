@@ -10,7 +10,6 @@ import (
 
 func TestSelectionSkipsExpandedRepoGroups(t *testing.T) {
 	m := Model{
-		expanded: map[string]bool{},
 		feeds: map[model.Feed][]model.Item{
 			model.FeedImportantNotifications: {
 				testItem("one", "repo-a"),
@@ -23,12 +22,12 @@ func TestSelectionSkipsExpandedRepoGroups(t *testing.T) {
 		t.Fatalf("selected row = %#v, want first item", m.rows[m.selected])
 	}
 
-	m.selectNext()
+	m, _ = m.handleAction(ActionDown)
 	if m.rows[m.selected].kind != rowItem || m.rows[m.selected].item.Title != "two" {
 		t.Fatalf("selected row = %#v, want second item", m.rows[m.selected])
 	}
 
-	m.selectPrev()
+	m, _ = m.handleAction(ActionUp)
 	if m.rows[m.selected].kind != rowItem || m.rows[m.selected].item.Title != "one" {
 		t.Fatalf("selected row = %#v, want first item", m.rows[m.selected])
 	}
@@ -36,7 +35,7 @@ func TestSelectionSkipsExpandedRepoGroups(t *testing.T) {
 
 func TestCollapsedRepoGroupIsSelectable(t *testing.T) {
 	m := Model{
-		expanded: map[string]bool{"repo:owner/repo-a": false},
+		collapsed: map[string]bool{},
 		feeds: map[model.Feed][]model.Item{
 			model.FeedImportantNotifications: {
 				testItem("one", "repo-a"),
@@ -44,14 +43,19 @@ func TestCollapsedRepoGroupIsSelectable(t *testing.T) {
 		},
 	}
 	m.rebuildRows()
-	if m.rows[m.selected].kind != rowRepo {
-		t.Fatalf("selected kind = %v, want rowRepo", m.rows[m.selected].kind)
+	m, _ = m.handleAction(ActionCollapse) // Move to the parent first.
+	m, _ = m.handleAction(ActionCollapse)
+	if len(m.rows) != 1 || m.rows[m.selected].kind != rowRepo {
+		t.Fatalf("collapsed rows = %#v, want only the parent", m.rows)
+	}
+	m, _ = m.handleAction(ActionExpand)
+	if got := m.rows[m.selected]; got.kind != rowItem || got.item.Title != "one" {
+		t.Fatalf("selected row after expanding = %#v, want first item", got)
 	}
 }
 
 func TestSelectionIsRememberedPerFeed(t *testing.T) {
 	m := Model{
-		expanded: map[string]bool{},
 		feeds: map[model.Feed][]model.Item{
 			model.FeedImportantNotifications: {
 				testItem("notification-one", "repo-a"),
@@ -63,10 +67,9 @@ func TestSelectionIsRememberedPerFeed(t *testing.T) {
 				testItem("pull-request-three", "repo-e"),
 			},
 		},
-		selectedByFeed: map[model.Feed]int{},
 	}
 	m.rebuildRows()
-	m.selectNext()
+	m, _ = m.handleAction(ActionDown)
 	if got := m.rows[m.selected].item.Title; got != "notification-two" {
 		t.Fatalf("selected = %q, want notification-two", got)
 	}
@@ -76,8 +79,8 @@ func TestSelectionIsRememberedPerFeed(t *testing.T) {
 		t.Fatalf("selected after switching tabs = %q, want pull-request-one", got)
 	}
 
-	m.selectNext()
-	m.selectNext()
+	m, _ = m.handleAction(ActionDown)
+	m, _ = m.handleAction(ActionDown)
 	if got := m.rows[m.selected].item.Title; got != "pull-request-three" {
 		t.Fatalf("selected = %q, want pull-request-three", got)
 	}

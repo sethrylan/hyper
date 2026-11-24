@@ -1,4 +1,3 @@
-//nolint:gochecknoglobals // GoReleaser injects these values with linker flags.
 package buildinfo
 
 import (
@@ -13,6 +12,7 @@ const (
 	sourceDistribution  = "source"
 )
 
+// GoReleaser sets these values with linker flags.
 var (
 	version      = developmentVersion
 	distribution = sourceDistribution

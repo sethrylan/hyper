@@ -3,6 +3,7 @@ package github
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -105,7 +107,7 @@ func (c *Client) RateLimits(ctx context.Context) (RateLimits, error) {
 			Search  restRateLimitResource `json:"search"`
 		} `json:"resources"`
 	}
-	if _, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/rate_limit", c.host), nil, &restResponse); err != nil {
+	if _, err := c.get(ctx, fmt.Sprintf("https://api.%s/rate_limit", c.host), &restResponse); err != nil {
 		return RateLimits{}, fmt.Errorf("fetch REST rate limits: %w", err)
 	}
 	limits := RateLimits{
@@ -144,7 +146,7 @@ func (c *Client) VerifyAccount(ctx context.Context, expected string) error {
 	var response struct {
 		Login string `json:"login"`
 	}
-	_, err := c.rest(ctx, http.MethodGet, fmt.Sprintf("https://api.%s/user", c.host), nil, &response)
+	_, err := c.get(ctx, fmt.Sprintf("https://api.%s/user", c.host), &response)
 	if err != nil {
 		return fmt.Errorf("fetch authenticated user: %w", err)
 	}
@@ -234,7 +236,7 @@ func (c *Client) fetchNotifications(ctx context.Context, me string) ([]model.Ite
 	}
 	items := importantItems(enrichedItems, me)
 
-	supplemental, supplementalWarning := c.fetchSupplementalImportantItems(ctx, me, time.Now())
+	supplemental, supplementalWarning := c.fetchSupplementalImportantItems(ctx, time.Now())
 	warning = joinWarning(warning, supplementalWarning)
 	items = mergeItems(items, importantItems(supplemental, me))
 	for i := range items {
@@ -257,19 +259,13 @@ func (c *Client) fetchRESTNotificationItems(ctx context.Context, since time.Time
 		}
 		endpoint := fmt.Sprintf("https://api.%s/notifications?%s", c.host, query.Encode())
 		var pageNotifications []restNotification
-		remaining, err := c.rest(ctx, http.MethodGet, endpoint, nil, &pageNotifications)
+		remaining, err := c.get(ctx, endpoint, &pageNotifications)
 		if err != nil {
 			return nil, warning, fmt.Errorf("fetch notifications: %w", err)
 		}
 		warning = joinWarning(warning, rateWarning(remaining))
-		if len(pageNotifications) == 0 {
-			break
-		}
 		remainingCap := maxNotifications - len(notifications)
-		if len(pageNotifications) > remainingCap {
-			pageNotifications = pageNotifications[:remainingCap]
-		}
-		notifications = append(notifications, pageNotifications...)
+		notifications = append(notifications, pageNotifications[:min(len(pageNotifications), remainingCap)]...)
 		if len(pageNotifications) < notificationPageSize {
 			break
 		}
@@ -307,7 +303,7 @@ func (c *Client) restNotificationItem(ctx context.Context, n restNotification) m
 		return item
 	}
 	var detail restSubjectDetail
-	if _, err := c.rest(ctx, http.MethodGet, n.Subject.URL, nil, &detail); err != nil {
+	if _, err := c.get(ctx, n.Subject.URL, &detail); err != nil {
 		return item
 	}
 	item.AuthorLogin = detail.User.Login
@@ -348,7 +344,7 @@ func (c *Client) enrichItems(ctx context.Context, items []model.Item) ([]model.I
 	for _, item := range items {
 		subject, ok := subjects[item.NodeID]
 		if ok {
-			item = mergeItem(item, subject.Item(c.host))
+			item = mergeItem(item, subject.item(c.host, notificationSubjectType(subject.TypeName)))
 		}
 		enriched = append(enriched, item)
 	}
@@ -374,10 +370,9 @@ func itemNodeIDs(items []model.Item) []string {
 func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[string]nodeSubject, string, error) {
 	subjects := map[string]nodeSubject{}
 	var warning string
-	for start := 0; start < len(ids); start += 100 {
-		end := min(start+100, len(ids))
+	for batch := range slices.Chunk(ids, 100) {
 		var response nodesResponse
-		if err := c.graphQL(ctx, nodesGraphQL, map[string]any{"ids": ids[start:end]}, &response); err != nil {
+		if err := c.graphQL(ctx, nodesGraphQL, map[string]any{"ids": batch}, &response); err != nil {
 			return nil, warning, err
 		}
 		warning = joinWarning(warning, rateWarning(response.Data.RateLimit.Remaining))
@@ -391,12 +386,12 @@ func (c *Client) fetchSubjectsByNodeID(ctx context.Context, ids []string) (map[s
 	return subjects, warning, nil
 }
 
-func (c *Client) fetchSupplementalImportantItems(ctx context.Context, me string, now time.Time) ([]model.Item, string) {
+func (c *Client) fetchSupplementalImportantItems(ctx context.Context, now time.Time) ([]model.Item, string) {
 	queries := supplementalImportantQueries(now)
 	var items []model.Item
 	var warning string
 	for _, source := range queries {
-		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries))
+		queryItems, queryWarning, err := c.searchQuery(ctx, source.Query, maxSearchResults/len(queries), searchGraphQL)
 		if err != nil {
 			warning = joinWarning(warning, "supplemental search failed: "+err.Error())
 			if errors.Is(err, errGraphQLRateLimitExhausted) {
@@ -496,9 +491,7 @@ func mergeShortImportantItems(existing, changed []model.Item, me string) []model
 }
 
 func mergeItem(base, incoming model.Item) model.Item {
-	if base.AuthorLogin == "" {
-		base.AuthorLogin = incoming.AuthorLogin
-	}
+	base.AuthorLogin = cmp.Or(base.AuthorLogin, incoming.AuthorLogin)
 	if base.CreatedAt.IsZero() {
 		base.CreatedAt = incoming.CreatedAt
 	}
@@ -508,42 +501,22 @@ func mergeItem(base, incoming model.Item) model.Item {
 		base.NodeID = incoming.NodeID
 		base.Key = model.StableKey(base.Host, base.NodeID, base.URL, base.Key)
 	}
-	if base.RepositoryName == "" {
-		base.RepositoryName = incoming.RepositoryName
-	}
-	if base.RepositoryOwner == "" {
-		base.RepositoryOwner = incoming.RepositoryOwner
-	}
-	if base.State == "" {
-		base.State = incoming.State
-	}
-	if base.StateReason == "" {
-		base.StateReason = incoming.StateReason
-	}
-	if base.NotificationReason == "" {
-		base.NotificationReason = incoming.NotificationReason
-	}
-	if base.NotificationThreadID == "" {
-		base.NotificationThreadID = incoming.NotificationThreadID
-	}
-	if base.Read == nil {
-		base.Read = incoming.Read
-	}
-	if base.Saved == nil {
-		base.Saved = incoming.Saved
-	}
-	if base.Title == "" {
-		base.Title = incoming.Title
-	}
+	base.RepositoryName = cmp.Or(base.RepositoryName, incoming.RepositoryName)
+	base.RepositoryOwner = cmp.Or(base.RepositoryOwner, incoming.RepositoryOwner)
+	base.State = cmp.Or(base.State, incoming.State)
+	base.StateReason = cmp.Or(base.StateReason, incoming.StateReason)
+	base.NotificationReason = cmp.Or(base.NotificationReason, incoming.NotificationReason)
+	base.NotificationThreadID = cmp.Or(base.NotificationThreadID, incoming.NotificationThreadID)
+	base.Read = cmp.Or(base.Read, incoming.Read)
+	base.Saved = cmp.Or(base.Saved, incoming.Saved)
+	base.Title = cmp.Or(base.Title, incoming.Title)
 	if base.Type == "" || base.Type == model.ItemTypeNotification {
 		base.Type = incoming.Type
 	}
 	if incoming.UpdatedAt.After(base.UpdatedAt) || base.UpdatedAt.IsZero() {
 		base.UpdatedAt = incoming.UpdatedAt
 	}
-	if base.URL == "" {
-		base.URL = incoming.URL
-	}
+	base.URL = cmp.Or(base.URL, incoming.URL)
 	base.Assignees = mergeStrings(base.Assignees, incoming.Assignees)
 	base.Reviewers = mergeStrings(base.Reviewers, incoming.Reviewers)
 	base.ReviewRequests = mergeStrings(base.ReviewRequests, incoming.ReviewRequests)
@@ -606,7 +579,7 @@ func (c *Client) search(ctx context.Context, feed model.Feed, now time.Time) ([]
 	if err != nil {
 		return nil, "", err
 	}
-	items, warning, err := c.searchQueryWithDocument(ctx, query, maxSearchResults, authoredSearchGraphQL)
+	items, warning, err := c.searchQuery(ctx, query, maxSearchResults, authoredSearchGraphQL)
 	if err != nil {
 		return nil, warning, fmt.Errorf("search %s: %w", feed.Title(), err)
 	}
@@ -629,19 +602,13 @@ func (c *Client) searchFirstPage(ctx context.Context, feed model.Feed, now time.
 	}
 	items := make([]model.Item, 0, len(response.Data.Search.Nodes))
 	for _, node := range response.Data.Search.Nodes {
-		item := node.Item(c.host)
-		if item.Key != "" {
-			items = append(items, item.WithFeed(feed))
-		}
+		item := node.searchItem(c.host)
+		items = append(items, item.WithFeed(feed))
 	}
 	return items, rateWarning(response.Data.RateLimit.Remaining), nil
 }
 
-func (c *Client) searchQuery(ctx context.Context, query string, limit int) ([]model.Item, string, error) {
-	return c.searchQueryWithDocument(ctx, query, limit, searchGraphQL)
-}
-
-func (c *Client) searchQueryWithDocument(ctx context.Context, query string, limit int, document string) ([]model.Item, string, error) {
+func (c *Client) searchQuery(ctx context.Context, query string, limit int, document string) ([]model.Item, string, error) {
 	var items []model.Item
 	var after *string
 	var warning string
@@ -653,10 +620,7 @@ func (c *Client) searchQueryWithDocument(ctx context.Context, query string, limi
 		}
 		warning = joinWarning(warning, rateWarning(response.Data.RateLimit.Remaining))
 		for _, node := range response.Data.Search.Nodes {
-			item := node.Item(c.host)
-			if item.Key != "" {
-				items = append(items, item)
-			}
+			items = append(items, node.searchItem(c.host))
 		}
 		if !response.Data.Search.PageInfo.HasNextPage || response.Data.Search.PageInfo.EndCursor == "" {
 			break
@@ -673,10 +637,9 @@ func (c *Client) graphQL(ctx context.Context, query string, variables map[string
 		return fmt.Errorf("encode graphql request: %w", err)
 	}
 	endpoint := fmt.Sprintf("https://api.%s/graphql", c.host)
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+	for attempt := 1; ; attempt++ {
 		var envelope graphQLEnvelope
-		raw, headers, err := c.doWithHeaders(ctx, http.MethodPost, endpoint, "application/json", bytes.NewReader(body))
+		raw, headers, err := c.doWithHeaders(ctx, http.MethodPost, endpoint, body)
 		if err != nil {
 			if rateLimitExhausted(headers) {
 				return fmt.Errorf("%w: %w", errGraphQLRateLimitExhausted, err)
@@ -692,22 +655,17 @@ func (c *Client) graphQL(ctx context.Context, query string, variables map[string
 			}
 			return nil
 		}
-		lastErr = fmt.Errorf("graphql error: %s", envelope.Errors[0].Message)
+		queryErr := fmt.Errorf("graphql error: %s", envelope.Errors[0].Message)
 		if rateLimitExhausted(headers) {
-			return fmt.Errorf("%w: %w", errGraphQLRateLimitExhausted, lastErr)
+			return fmt.Errorf("%w: %w", errGraphQLRateLimitExhausted, queryErr)
 		}
 		if attempt > maxRetries || !retryableGraphQLError(envelope.Errors[0]) {
-			break
+			return queryErr
 		}
-		delay := retryDelay(attempt + 1)
-		if retryAfter := retryAfterDelay(headers); retryAfter > delay {
-			delay = retryAfter
-		}
-		if err := c.retrySleep(ctx, delay); err != nil {
-			return fmt.Errorf("retry wait canceled after %s: %w", delay, err)
+		if err := c.waitForRetry(ctx, attempt+1, headers); err != nil {
+			return err
 		}
 	}
-	return lastErr
 }
 
 type graphQLEnvelope struct {
@@ -727,13 +685,10 @@ func retryableGraphQLError(err graphQLError) bool {
 		strings.Contains(value, "temporarily unavailable")
 }
 
-func (c *Client) rest(ctx context.Context, method, endpoint string, body io.Reader, out any) (int, error) {
-	raw, headers, err := c.doWithHeaders(ctx, method, endpoint, "application/json", body)
+func (c *Client) get(ctx context.Context, endpoint string, out any) (int, error) {
+	raw, headers, err := c.doWithHeaders(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return 0, err
-	}
-	if out == nil {
-		return remaining(headers), nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return remaining(headers), fmt.Errorf("decode REST response: %w", err)
@@ -741,54 +696,35 @@ func (c *Client) rest(ctx context.Context, method, endpoint string, body io.Read
 	return remaining(headers), nil
 }
 
-func (c *Client) doWithHeaders(ctx context.Context, method, endpoint, contentType string, body io.Reader) ([]byte, http.Header, error) {
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = io.ReadAll(body)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read request body: %w", err)
+func (c *Client) doWithHeaders(ctx context.Context, method, endpoint string, body []byte) ([]byte, http.Header, error) {
+	for attempt := 1; ; attempt++ {
+		raw, headers, err := c.doOnce(ctx, method, endpoint, body)
+		if err == nil || attempt > maxRetries || !retryable(err, headers) {
+			return raw, headers, err
+		}
+		if err := c.waitForRetry(ctx, attempt+1, headers); err != nil {
+			return nil, headers, err
 		}
 	}
-
-	var lastHeaders http.Header
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries+1; attempt++ {
-		raw, headers, err := c.doOnce(ctx, method, endpoint, contentType, bodyBytes)
-		if err == nil {
-			return raw, headers, nil
-		}
-		lastHeaders = headers
-		lastErr = err
-		if attempt > maxRetries || !retryable(err, headers) {
-			break
-		}
-		delay := retryDelay(attempt + 1)
-		if retryAfter := retryAfterDelay(headers); retryAfter > delay {
-			delay = retryAfter
-		}
-		if err := c.retrySleep(ctx, delay); err != nil {
-			return nil, lastHeaders, fmt.Errorf("retry wait canceled after %s: %w", delay, err)
-		}
-	}
-	return nil, lastHeaders, lastErr
 }
 
-func (c *Client) doOnce(ctx context.Context, method, endpoint, contentType string, bodyBytes []byte) ([]byte, http.Header, error) {
-	var body io.Reader
-	if bodyBytes != nil {
-		body = bytes.NewReader(bodyBytes)
+func (c *Client) waitForRetry(ctx context.Context, attempt int, headers http.Header) error {
+	delay := max(retryDelay(attempt), retryAfterDelay(headers))
+	if err := c.retrySleep(ctx, delay); err != nil {
+		return fmt.Errorf("retry wait canceled after %s: %w", delay, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	return nil
+}
+
+func (c *Client) doOnce(ctx context.Context, method, endpoint string, body []byte) ([]byte, http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "hyper")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("send request: %w", err)
@@ -828,16 +764,10 @@ func retryDelay(attempt int) time.Duration {
 	}
 	seconds := math.Pow(2, float64(attempt)) - 2
 	delay := time.Duration(seconds) * time.Second
-	if delay > maxRetryDelay {
-		return maxRetryDelay
-	}
-	return delay
+	return min(delay, maxRetryDelay)
 }
 
 func retryable(err error, headers http.Header) bool {
-	if err == nil {
-		return false
-	}
 	if rateLimitExhausted(headers) {
 		return false
 	}
@@ -858,10 +788,6 @@ func retryable(err error, headers http.Header) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Timeout() {
-		return true
-	}
 	var netErr interface{ Timeout() bool }
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
@@ -874,13 +800,10 @@ func retryable(err error, headers http.Header) bool {
 }
 
 func rateLimitExhausted(headers http.Header) bool {
-	return headers != nil && strings.TrimSpace(headers.Get("X-Ratelimit-Remaining")) == "0"
+	return strings.TrimSpace(headers.Get("X-Ratelimit-Remaining")) == "0"
 }
 
 func retryAfterDelay(headers http.Header) time.Duration {
-	if headers == nil {
-		return 0
-	}
 	value := headers.Get("Retry-After")
 	if value == "" {
 		return 0
@@ -910,11 +833,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 func remaining(headers http.Header) int {
-	value := headers.Get("X-Ratelimit-Remaining")
-	if value == "" {
-		return -1
-	}
-	n, err := strconv.Atoi(value)
+	n, err := strconv.Atoi(headers.Get("X-Ratelimit-Remaining"))
 	if err != nil {
 		return -1
 	}
@@ -1089,7 +1008,7 @@ type nodeSubject struct {
 	URL         string    `json:"url"`
 }
 
-func (n nodeSubject) Item(host string) model.Item {
+func (n nodeSubject) item(host string, itemType model.ItemType) model.Item {
 	return model.Item{
 		Assignees:       logins(n.Assignees.Nodes),
 		AuthorLogin:     n.Author.Login,
@@ -1106,10 +1025,18 @@ func (n nodeSubject) Item(host string) model.Item {
 		State:           n.State,
 		StateReason:     n.StateReason,
 		Title:           n.Title,
-		Type:            notificationSubjectType(n.TypeName),
+		Type:            itemType,
 		UpdatedAt:       n.UpdatedAt,
 		URL:             n.URL,
 	}
+}
+
+func (n nodeSubject) searchItem(host string) model.Item {
+	itemType := model.ItemTypeIssue
+	if n.TypeName == "PullRequest" {
+		itemType = model.ItemTypePullRequest
+	}
+	return n.item(host, itemType)
 }
 
 type review struct {
@@ -1228,64 +1155,11 @@ type searchResponse struct {
 			Remaining int `json:"remaining"`
 		} `json:"rateLimit"`
 		Search struct {
-			Nodes    []searchNode `json:"nodes"`
+			Nodes    []nodeSubject `json:"nodes"`
 			PageInfo struct {
 				EndCursor   string `json:"endCursor"`
 				HasNextPage bool   `json:"hasNextPage"`
 			} `json:"pageInfo"`
 		} `json:"search"`
 	} `json:"data"`
-}
-
-type searchNode struct {
-	TypeName      string                 `json:"__typename"`
-	Assignees     struct{ Nodes []user } `json:"assignees"`
-	Author        user                   `json:"author"`
-	CreatedAt     time.Time              `json:"createdAt"`
-	ID            string                 `json:"id"`
-	IsDraft       bool                   `json:"isDraft"`
-	LatestReviews struct {
-		Nodes []review `json:"nodes"`
-	} `json:"latestReviews"`
-	Repository struct {
-		Name  string `json:"name"`
-		Owner user   `json:"owner"`
-	} `json:"repository"`
-	ReviewRequests struct {
-		Nodes []reviewRequest `json:"nodes"`
-	} `json:"reviewRequests"`
-	Merged      bool      `json:"merged"`
-	State       string    `json:"state"`
-	StateReason string    `json:"stateReason"`
-	Title       string    `json:"title"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	URL         string    `json:"url"`
-}
-
-func (n searchNode) Item(host string) model.Item {
-	itemType := model.ItemTypeIssue
-	if n.TypeName == "PullRequest" {
-		itemType = model.ItemTypePullRequest
-	}
-	item := model.Item{
-		Assignees:       logins(n.Assignees.Nodes),
-		AuthorLogin:     n.Author.Login,
-		CreatedAt:       n.CreatedAt,
-		Draft:           n.IsDraft,
-		Host:            host,
-		Key:             model.StableKey(host, n.ID, n.URL, n.Title),
-		Merged:          n.Merged,
-		NodeID:          n.ID,
-		RepositoryName:  n.Repository.Name,
-		RepositoryOwner: n.Repository.Owner.Login,
-		State:           n.State,
-		StateReason:     n.StateReason,
-		Title:           n.Title,
-		Type:            itemType,
-		UpdatedAt:       n.UpdatedAt,
-		URL:             n.URL,
-	}
-	item.Reviewers = reviewAuthorLogins(n.LatestReviews.Nodes)
-	item.ReviewRequests = reviewerLogins(n.ReviewRequests.Nodes)
-	return item
 }

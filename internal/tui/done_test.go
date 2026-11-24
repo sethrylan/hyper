@@ -34,12 +34,9 @@ func TestRefreshUsesReconciledDoneCache(t *testing.T) {
 	}
 
 	m := Model{
-		activeFeed:     0,
-		expanded:       map[string]bool{},
-		feeds:          map[model.Feed][]model.Item{model.FeedImportantNotifications: {item}},
-		host:           "github.com",
-		selectedByFeed: map[model.Feed]int{},
-		store:          store,
+		feeds: map[model.Feed][]model.Item{model.FeedImportantNotifications: {item}},
+		host:  "github.com",
+		store: store,
 	}
 	updated, _ := m.Update(feedRefreshMsg{
 		kind: refreshNotifications,
@@ -84,12 +81,9 @@ func TestDoneActionMarksVisibleDoneItemUndone(t *testing.T) {
 	}
 
 	m := Model{
-		activeFeed:     0,
-		expanded:       map[string]bool{},
-		feeds:          map[model.Feed][]model.Item{model.FeedImportantNotifications: {item}},
-		host:           "github.com",
-		selectedByFeed: map[model.Feed]int{},
-		store:          store,
+		feeds: map[model.Feed][]model.Item{model.FeedImportantNotifications: {item}},
+		host:  "github.com",
+		store: store,
 	}
 	m.rebuildRows()
 
@@ -123,12 +117,10 @@ func TestDoneActionIsIgnoredOutsideImportantNotifications(t *testing.T) {
 		URL:             "https://github.com/owner/repo/pull/1",
 	}
 	m := Model{
-		activeFeed:     1,
-		expanded:       map[string]bool{},
-		feeds:          map[model.Feed][]model.Item{model.FeedMyPullRequests: {item}},
-		host:           "github.com",
-		selectedByFeed: map[model.Feed]int{},
-		store:          store,
+		activeFeed: 1,
+		feeds:      map[model.Feed][]model.Item{model.FeedMyPullRequests: {item}},
+		host:       "github.com",
+		store:      store,
 	}
 	m.rebuildRows()
 

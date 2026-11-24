@@ -9,23 +9,17 @@ import (
 	"path/filepath"
 )
 
-// Read decodes path into target and reports whether the file contained data.
-func Read(path string, target any) (bool, error) {
+// Read decodes path into target when the file exists and is nonempty.
+func Read(path string, target any) error {
 	//nolint:gosec // Callers provide application-owned state paths.
 	content, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	if len(content) == 0 {
-		return false, nil
+	if err != nil || len(content) == 0 {
+		return err
 	}
-	if err := json.Unmarshal(content, target); err != nil {
-		return false, err
-	}
-	return true, nil
+	return json.Unmarshal(content, target)
 }
 
 // Write atomically replaces path with an indented JSON encoding of value.

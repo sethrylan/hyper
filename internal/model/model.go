@@ -2,6 +2,7 @@
 package model
 
 import (
+	"cmp"
 	"slices"
 	"time"
 )
@@ -14,7 +15,7 @@ const (
 	FeedMyIssues               Feed = "my_issues"
 )
 
-var Feeds = []Feed{FeedImportantNotifications, FeedMyPullRequests, FeedMyIssues}
+var Feeds = [...]Feed{FeedImportantNotifications, FeedMyPullRequests, FeedMyIssues}
 
 func (f Feed) Title() string {
 	switch f {
@@ -83,12 +84,5 @@ func (i Item) WithFeed(feed Feed) Item {
 }
 
 func StableKey(host, nodeID, url, fallback string) string {
-	switch {
-	case nodeID != "":
-		return host + "|" + nodeID
-	case url != "":
-		return host + "|" + url
-	default:
-		return host + "|" + fallback
-	}
+	return host + "|" + cmp.Or(nodeID, url, fallback)
 }
